@@ -20,7 +20,9 @@ pub enum Action {
     Poweroff,
     Shell,
     /// Chain another iPXE script or EFI binary, e.g. netboot.xyz.
-    Chain { url: String },
+    Chain {
+        url: String,
+    },
     /// A Linux-style kernel, initrds and command line.
     Kernel {
         kernel: String,
@@ -30,7 +32,9 @@ pub enum Action {
         cmdline: String,
     },
     /// An admin-written iPXE script, used as is.
-    Script { script: String },
+    Script {
+        script: String,
+    },
 }
 
 /// Removes what iPXE would interpret in displayed text: settings expansion (`$`, braces),
@@ -187,9 +191,13 @@ pub fn menu(m: &Menu) -> String {
     s
 }
 
-/// The script that performs `action`. `title` is shown while it starts.
-pub fn boot(action: &Action, title: &str) -> String {
+/// The script that performs `action`. `title` is shown while it starts. `base_url` is
+/// BootBob's URL, for coming back to the menu if the boot fails: a machine can get here
+/// straight from the embedded script, without the menu having set it.
+pub fn boot(action: &Action, title: &str, base_url: &str) -> String {
     let mut s = String::from("#!ipxe\n");
+    let _ = writeln!(s, "set bootbob {base_url}");
+    let _ = writeln!(s, "set bootbob-id {IDENTITY_QUERY}");
     let title = text(title);
     match action {
         Action::LocalDisk => {
@@ -298,18 +306,17 @@ mod tests {
     #[test]
     fn boot_scripts() {
         let k = boot(
-            &Action::Kernel {
-                kernel: "http://x/vmlinuz".into(),
-                initrds: vec!["http://x/initrd".into()],
-                cmdline: "console=ttyS0".into(),
-            },
+            &Action::Kernel { kernel: "http://x/vmlinuz".into(), initrds: vec!["http://x/initrd".into()], cmdline: "console=ttyS0".into() },
             "Debian installer",
+            "http://b",
         );
+        assert!(k.starts_with("#!ipxe\nset bootbob http://b\nset bootbob-id mac="));
         assert!(k.contains("kernel http://x/vmlinuz console=ttyS0 || goto failed"));
         assert!(k.contains("initrd http://x/initrd || goto failed"));
         assert!(k.contains(":failed"));
-        assert_eq!(boot(&Action::Reboot, "x"), "#!ipxe\nreboot\n");
-        assert_eq!(boot(&Action::Script { script: "#!ipxe\r\necho hi".into() }, "x"), "#!ipxe\necho hi\n");
-        assert!(boot(&Action::LocalDisk, "Local disk").contains("sanboot --no-describe --drive 0x80 || exit"));
+        assert!(boot(&Action::Reboot, "x", "http://b").ends_with("\nreboot\n"));
+        let script = boot(&Action::Script { script: "#!ipxe\r\necho hi".into() }, "x", "http://b");
+        assert!(script.ends_with("&ip=${ip}\necho hi\n"), "{script}");
+        assert!(boot(&Action::LocalDisk, "Local disk", "http://b").contains("sanboot --no-describe --drive 0x80 || exit"));
     }
 }

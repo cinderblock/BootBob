@@ -97,8 +97,7 @@ mod imp {
                 ETH_P_IP.to_be() as libc::c_int,
             ))?;
             let fd = OwnedFd::from_raw_fd(fd);
-            let mut prog: Vec<libc::sock_filter> =
-                FILTER.iter().map(|&(code, jt, jf, k)| libc::sock_filter { code, jt, jf, k }).collect();
+            let mut prog: Vec<libc::sock_filter> = FILTER.iter().map(|&(code, jt, jf, k)| libc::sock_filter { code, jt, jf, k }).collect();
             let fprog = libc::sock_fprog { len: prog.len() as u16, filter: prog.as_mut_ptr() };
             check(libc::setsockopt(
                 fd.as_raw_fd(),

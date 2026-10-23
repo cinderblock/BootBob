@@ -22,7 +22,10 @@ fn pxe_options(m: &mut Message, firmware: Firmware) {
     // UNDI 3.16, as UEFI firmware reports it.
     m.set_opt(OPT_NDI, [1, 3, 16]);
     m.set_opt(OPT_VENDOR_CLASS, format!("PXEClient:Arch:{arch:05}:UNDI:003016").into_bytes());
-    m.set_opt(OPT_PARAMS, [1, 3, 6, OPT_VENDOR_INFO, OPT_SERVER_ID, OPT_VENDOR_CLASS, OPT_SERVER_NAME, OPT_BOOTFILE, 128, 129, 130, 131, 132, 133, 134, 135]);
+    m.set_opt(
+        OPT_PARAMS,
+        [1, 3, 6, OPT_VENDOR_INFO, OPT_SERVER_ID, OPT_VENDOR_CLASS, OPT_SERVER_NAME, OPT_BOOTFILE, 128, 129, 130, 131, 132, 133, 134, 135],
+    );
 }
 
 /// A broadcast `DISCOVER` that looks like `firmware`'s PXE ROM.
