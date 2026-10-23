@@ -17,6 +17,10 @@ use crate::model::{Millis, now_ms};
 use crate::state::State;
 use crate::tftp::ipxe_file;
 
+/// How long to collect offers for. dnsmasq pings an address for about 3 s before
+/// offering it; leave room for that and a slow gateway.
+const PROBE_WAIT: Duration = Duration::from_secs(8);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -226,24 +230,32 @@ pub async fn run(st: &State) -> Report {
 
     match probing {
         Some(iface) => {
-            let mut all = Vec::new();
+            // Both probes go out together, then one wait: servers often check that an
+            // address is free (dnsmasq pings it) before offering it, which takes seconds.
+            let base = now_ms() as u32;
+            let mut sent = Vec::new();
             for (n, fw) in [Firmware::EfiX64, Firmware::Bios].into_iter().enumerate() {
-                let xid = (now_ms() as u32).wrapping_add(n as u32);
-                let mac = probe::probe_mac(xid & 0x00ff_ffff);
+                let xid = base.wrapping_add(n as u32);
                 st.expect_probe(xid);
-                let sent = probe::send(&iface, &probe::discover(xid, mac, fw));
-                if let Err(e) = sent {
-                    st.take_probe(xid);
-                    checks.push(check(
-                        &format!("dhcp-{}", fw.slug()),
-                        &format!("DHCP tells {} machines to boot from BootBob", fw.slug()),
-                        Status::Skip,
-                        format!("Couldn't send the probe: {e}."),
-                        None,
-                    ));
-                    continue;
+                match probe::send(&iface, &probe::discover(xid, probe::probe_mac(xid & 0x00ff_ffff), fw)) {
+                    Ok(()) => sent.push((fw, xid)),
+                    Err(e) => {
+                        st.take_probe(xid);
+                        checks.push(check(
+                            &format!("dhcp-{}", fw.slug()),
+                            &format!("DHCP tells {} machines to boot from BootBob", fw.slug()),
+                            Status::Skip,
+                            format!("Couldn't send the probe: {e}."),
+                            None,
+                        ));
+                    }
                 }
-                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            if !sent.is_empty() {
+                tokio::time::sleep(PROBE_WAIT).await;
+            }
+            let mut all = Vec::new();
+            for (fw, xid) in sent {
                 let offers = st.take_probe(xid);
                 checks.push(evaluate_offers(fw, &offers, ours.as_deref(), &file));
                 all.extend(offers);
