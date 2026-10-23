@@ -103,3 +103,59 @@ jobs:
           curl -sf localhost:18067/api/status | grep -q '"bootbob-efi-x64.efi"'
           curl -sf localhost:18067/ | grep -q '<div id="app">'
           docker logs bb
+
+  # Push to master, everything green → publish the image to GHCR. Which build runs on
+  # steamboat is pinned in the ops repo (servers/steamboat/stacks/bootbob/pin.json), so
+  # nothing reaches a server until that pin is updated there.
+  publish:
+    needs: [backend, web, e2e, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # GHCR names are lowercase; the repo is cinderblock/BootBob.
+      IMAGE: ghcr.io/cinderblock/bootbob
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          # ops checks this label against the commit its pin names.
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Summarize how to deploy this build
+        run: |
+          {
+            echo "### Image published"
+            echo
+            echo '```json'
+            echo '{'
+            echo '  "image": "${{ env.IMAGE }}",'
+            echo '  "digest": "${{ steps.push.outputs.digest }}",'
+            echo '  "source": {'
+            echo '    "repo": "${{ github.repository }}",'
+            echo '    "commit": "${{ github.sha }}"'
+            echo '  }'
+            echo '}'
+            echo '```'
+            echo
+            echo 'Paste into `servers/steamboat/stacks/bootbob/pin.json` in cinderblock/ops and push.'
+            echo 'Nothing reaches the host until you do.'
+          } >> "$GITHUB_STEP_SUMMARY"
