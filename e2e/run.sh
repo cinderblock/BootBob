@@ -84,6 +84,11 @@ wait_for() {
   return 1
 }
 
+# What actually crosses the bridge, for when a check fails.
+tcpdump -lnei "$br" 'udp and (port 67 or port 68 or port 69)' >"$work/tcpdump.log" 2>&1 &
+pids+=($!)
+sleep 1
+
 echo "==== network check"
 report=$(curl -sf -X POST "$api/doctor")
 echo "$report" | jq -r '.checks[] | "\(.status)\t\(.title): \(.detail)"'

@@ -331,6 +331,13 @@ impl State {
 
     pub fn observe(&self, seen: Seen) {
         let now = now_ms();
+        match &seen {
+            Seen::Dhcp { src_mac, src_ip, from_server, msg, .. } => tracing::debug!(
+                %src_mac, %src_ip, from_server, xid = format!("{:#010x}", msg.xid), kind = ?msg.msg_type(), client = ?msg.mac(),
+                "listener: DHCP"
+            ),
+            Seen::TftpRequest { src_mac, src_ip, path } => tracing::debug!(%src_mac, %src_ip, path, "listener: TFTP request"),
+        }
         match seen {
             Seen::Dhcp { src_mac, from_server, msg, .. } => {
                 {
