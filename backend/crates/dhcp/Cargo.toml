@@ -1,0 +1,15 @@
+[package]
+name = "bootbob-dhcp"
+description = "DHCP parsing, a passive PXE listener, and client-style probes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true

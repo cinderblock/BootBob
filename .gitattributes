@@ -1,0 +1,7 @@
+# Code that runs on Linux keeps LF, even in a Windows checkout: a CRLF shell script or
+# unit file breaks once it's copied to the server.
+*.sh text eol=lf
+backend/** text eol=lf
+web/** text eol=lf
+ipxe/** text eol=lf
+packaging/** text eol=lf

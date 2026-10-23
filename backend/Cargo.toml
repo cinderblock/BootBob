@@ -1,0 +1,46 @@
+# BootBob's Rust backend: the network boot server, one statically linked binary.
+#
+# Crates:
+#   bootbob-tftp   async read-only TFTP server (blksize, tsize, timeout, windowsize)
+#   bootbob-dhcp   DHCP parsing, the passive listener, firmware arch detection
+#   bootbob-ipxe   iPXE script generation (fallback menu, boot scripts)
+#   bootbob        the server binary: config, device store, resolver, HTTP API, web UI
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+publish = false
+
+[workspace.dependencies]
+bootbob-tftp = { path = "crates/tftp" }
+bootbob-dhcp = { path = "crates/dhcp" }
+bootbob-ipxe = { path = "crates/ipxe" }
+
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "json"] }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+libc = "0.2"
+redb = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+toml = "1"
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
