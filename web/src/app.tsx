@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { Devices } from "./devices";
+import { Doctor } from "./doctor";
 import { Images } from "./images";
 import { useLive, useNow } from "./live";
 import { Log } from "./log";
 import { SettingsView } from "./settings";
 
-const tabs = ["Machines", "Images", "Settings", "Log"] as const;
+const tabs = ["Machines", "Images", "Network check", "Settings", "Log"] as const;
 type Tab = (typeof tabs)[number];
 
 export function App() {
@@ -53,6 +54,7 @@ export function App() {
       <main>
         {tab === "Machines" && <Devices live={live} now={now} />}
         {tab === "Images" && <Images live={live} />}
+        {tab === "Network check" && <Doctor now={now} />}
         {tab === "Settings" && <SettingsView live={live} />}
         {tab === "Log" && <Log events={live.events} devices={live.devices} now={now} />}
       </main>

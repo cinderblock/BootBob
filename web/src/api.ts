@@ -139,3 +139,21 @@ export type Change =
   | { what: "settings" }
   | { what: "event" }
   | { what: "resync" };
+
+export interface DoctorCheck {
+  id: string;
+  title: string;
+  status: "ok" | "warn" | "fail" | "skip";
+  detail: string;
+  fix: string | null;
+}
+
+export interface DoctorReport {
+  at: Millis;
+  checks: DoctorCheck[];
+}
+
+export const doctor = {
+  last: () => call<DoctorReport | null>("GET", "/api/doctor"),
+  run: () => call<DoctorReport>("POST", "/api/doctor"),
+};

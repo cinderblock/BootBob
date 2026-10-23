@@ -57,6 +57,9 @@ pub struct State {
     /// IP → MAC, learnt from DHCP replies and TFTP request frames.
     addresses: Mutex<HashMap<Ipv4Addr, (Mac, Millis)>>,
     pub listener: RwLock<ListenerStatus>,
+    /// The doctor's probes in flight, by DHCP transaction id, with the offers they got.
+    probes: Mutex<HashMap<u32, Vec<crate::doctor::Offer>>>,
+    report: Mutex<Option<crate::doctor::Report>>,
     changes: broadcast::Sender<Change>,
 }
 
@@ -81,6 +84,8 @@ impl State {
             settings: RwLock::new(settings),
             events: Mutex::new(events),
             addresses: Mutex::new(HashMap::new()),
+            probes: Mutex::new(HashMap::new()),
+            report: Mutex::new(None),
             changes,
         })
     }
@@ -280,6 +285,24 @@ impl State {
         self.event(Some(mac), "boot", format!("Booting {title} ({reason})"));
     }
 
+    // ---- The doctor ----
+
+    pub fn expect_probe(&self, xid: u32) {
+        self.probes.lock().unwrap().insert(xid, Vec::new());
+    }
+
+    pub fn take_probe(&self, xid: u32) -> Vec<crate::doctor::Offer> {
+        self.probes.lock().unwrap().remove(&xid).unwrap_or_default()
+    }
+
+    pub fn set_report(&self, r: crate::doctor::Report) {
+        *self.report.lock().unwrap() = Some(r);
+    }
+
+    pub fn report(&self) -> Option<crate::doctor::Report> {
+        self.report.lock().unwrap().clone()
+    }
+
     // ---- Addresses ----
 
     pub fn learn_address(&self, ip: Ipv4Addr, mac: Mac) {
@@ -314,6 +337,17 @@ impl State {
                     let mut l = self.listener.write().unwrap();
                     l.dhcp_seen += 1;
                     l.last_seen = Some(now);
+                }
+                // A reply to one of the doctor's probes: hand it over, and don't treat the
+                // probe's made-up MAC as a machine.
+                if from_server && let Some(offers) = self.probes.lock().unwrap().get_mut(&msg.xid) {
+                    offers.push(crate::doctor::Offer {
+                        server: msg.server_id(),
+                        src_mac,
+                        boot_server: msg.boot_server(),
+                        boot_file: msg.boot_file(),
+                    });
+                    return;
                 }
                 let Some(client) = msg.mac() else { return };
                 if from_server {

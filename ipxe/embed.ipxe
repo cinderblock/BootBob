@@ -19,7 +19,7 @@ isset ${next-server} || goto no_server
 set bootbob-url http://${next-server}:8067
 
 :ask
-chain --replace --autofree ${bootbob-url}/boot/ipxe?mac=${netX/mac:uristring}&uuid=${uuid:uristring}&serial=${serial:uristring}&manufacturer=${manufacturer:uristring}&product=${product:uristring}&asset=${asset:uristring}&platform=${platform}&arch=${buildarch}&ip=${netX/ip} || goto unreachable
+chain --replace --autofree ${bootbob-url}/boot/ipxe?mac=${netX/mac:hexhyp}&uuid=${uuid}&serial=${serial:uristring}&manufacturer=${manufacturer:uristring}&product=${product:uristring}&asset=${asset:uristring}&platform=${platform}&arch=${buildarch}&ip=${netX/ip} || goto unreachable
 
 :unreachable
 echo BootBob: can't reach ${bootbob-url}; trying again in 10 seconds (Ctrl-C for a shell)

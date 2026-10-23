@@ -6,9 +6,12 @@
 # Needs root (bridge, tap, TFTP port 69, the DHCP listener's packet socket), qemu-system-x86,
 # ovmf and dnsmasq. Meant for a throwaway CI VM: it creates bridge bb-e2e and runs dnsmasq
 # as the DHCP server on it, standing in for UniFi with next-server plus one boot file name.
-# The bridge has no uplink, so none of this reaches a real network.
+# dnsmasq lives in its own network namespace on a veth into the bridge, so its replies
+# reach BootBob from outside, as a real gateway's do. The bridge has no uplink, so none of
+# this reaches a real network.
 #
-# For each firmware (SeaBIOS, then OVMF) it checks that:
+# First, the network check must pass for BIOS and UEFI (its probes get dnsmasq's offers).
+# Then, for each firmware (SeaBIOS, then OVMF) it checks that:
 #   1. the machine reaches BootBob's fallback menu, which proves TFTP served the right iPXE
 #      build under the single file name (default_firmware is deliberately wrong, so the
 #      DHCP listener's arch detection has to have worked);
@@ -28,6 +31,8 @@ cleanup() {
   status=$?
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
   ip link del bb-tap0 2>/dev/null || true
+  ip link del bb-veth0 2>/dev/null || true
+  ip netns del bb-dhcp 2>/dev/null || true
   ip link del "$br" 2>/dev/null || true
   if [ $status -ne 0 ]; then
     for f in "$work"/*.log; do echo "==== $f"; tail -n 80 "$f"; done
@@ -42,7 +47,15 @@ ip link set "$br" up
 ip tuntap add bb-tap0 mode tap
 ip link set bb-tap0 master "$br" up
 
-dnsmasq --no-daemon --conf-file=/dev/null --port=0 --interface="$br" --bind-interfaces \
+ip netns add bb-dhcp
+ip link add bb-veth0 type veth peer name bb-veth1
+ip link set bb-veth1 netns bb-dhcp
+ip link set bb-veth0 master "$br" up
+ip -n bb-dhcp addr add "$net.2/24" dev bb-veth1
+ip -n bb-dhcp link set bb-veth1 up
+ip -n bb-dhcp link set lo up
+
+ip netns exec bb-dhcp dnsmasq --no-daemon --conf-file=/dev/null --port=0 --interface=bb-veth1 --bind-interfaces \
   --dhcp-range="$net.50,$net.99,1h" --dhcp-boot="bootbob,,$net.1" --log-dhcp \
   --dhcp-leasefile="$work/leases" >"$work/dnsmasq.log" 2>&1 &
 pids+=($!)
@@ -71,6 +84,15 @@ wait_for() {
   return 1
 }
 
+echo "==== network check"
+report=$(curl -sf -X POST "$api/doctor")
+echo "$report" | jq -r '.checks[] | "\(.status)\t\(.title): \(.detail)"'
+for id in dhcp-efi-x64 dhcp-bios dhcp-rogue listener tftp; do
+  echo "$report" | jq -e --arg id "$id" '.checks[] | select(.id == $id) | .status == "ok"' >/dev/null \
+    || { echo "FAIL: network check $id"; exit 1; }
+done
+echo "ok: the network check sees dnsmasq's boot options for BIOS and UEFI"
+
 accel=tcg
 [ -w /dev/kvm ] && accel=kvm
 
@@ -84,8 +106,7 @@ run() { # name mac firmware-slug qemu-args...
   pids+=("$qemu")
 
   wait_for "$mac" '.state == "at_menu"' 240 "$name reached the fallback menu"
-  wait_for "$mac" ".firmware == \"$slug\"" 5 "$name recorded as $slug"
-  echo "ok: $name is waiting at the menu as $slug"
+  wait_for "$mac" ".firmware == \"$slug\"" 5 "$name recorded as $slug"  echo "ok: $name is waiting at the menu as $slug"
 
   curl -sf -X PUT -H 'content-type: application/json' -d '{"image":"poweroff","once":true}' \
     "$api/devices/$mac/assignment" >/dev/null

@@ -4,6 +4,7 @@
 //! :8067 and TFTP on :69 from `./data` and `./ipxe`, with the DHCP listener off.
 
 mod config;
+mod doctor;
 mod http;
 mod model;
 mod state;

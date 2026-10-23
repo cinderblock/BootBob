@@ -405,3 +405,42 @@ footer {
   color: var(--muted);
   font-size: 12px;
 }
+
+ul.checks {
+  list-style: none;
+  padding: 0;
+}
+
+ul.checks li {
+  display: flex;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+ul.checks .mark {
+  width: 22px;
+  text-align: center;
+  font-weight: 700;
+}
+
+ul.checks li.ok .mark {
+  color: var(--ok);
+}
+
+ul.checks li.warn .mark {
+  color: var(--warn);
+}
+
+ul.checks li.fail .mark {
+  color: var(--bad);
+}
+
+ul.checks li.skip .mark {
+  color: var(--muted);
+}
+
+ul.checks .fix {
+  margin-top: 4px;
+  color: var(--accent);
+}

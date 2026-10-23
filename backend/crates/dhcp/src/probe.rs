@@ -46,6 +46,49 @@ pub fn inform(xid: u32, mac: Mac, addr: Ipv4Addr, firmware: Firmware) -> Message
     m
 }
 
+/// Broadcasts a probe on `interface` (from port 68 when it's free, else an ephemeral
+/// port; servers answer to port 68 either way, where the passive listener sees the reply).
+/// Linux only.
+pub fn send(interface: &str, msg: &Message) -> std::io::Result<()> {
+    imp::send(interface, &msg.encode())
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
+    use std::io;
+    use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+    use std::os::fd::AsRawFd;
+
+    fn bind_to_device(sock: &UdpSocket, interface: &str) -> io::Result<()> {
+        // SAFETY: setsockopt with a pointer to the interface name and its length.
+        let r = unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                interface.as_ptr() as *const libc::c_void,
+                interface.len() as libc::socklen_t,
+            )
+        };
+        if r < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    }
+
+    pub fn send(interface: &str, packet: &[u8]) -> io::Result<()> {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 68)).or_else(|_| UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)))?;
+        sock.set_broadcast(true)?;
+        bind_to_device(&sock, interface)?;
+        sock.send_to(packet, SocketAddrV4::new(Ipv4Addr::BROADCAST, 67))?;
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod imp {
+    pub fn send(_interface: &str, _packet: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "DHCP probes need Linux"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

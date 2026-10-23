@@ -58,10 +58,10 @@ async fn json(st: &Arc<State>, uri: &str) -> Value {
     serde_json::from_str(&get(st, uri).await).unwrap()
 }
 
-/// What iPXE sends, URI-encoded as `${…:uristring}` would.
+/// What iPXE sends: the MAC as `${netX/mac:hexhyp}`, text as `${…:uristring}`.
 fn ident(extra: &str) -> String {
     format!(
-        "/boot/ipxe?mac=52%3A54%3A00%3A12%3A34%3A56&uuid=0d0c0b0a-0f0e-0100-0203-040506070809&serial=To%20Be%20Filled%20By%20O.E.M.\
+        "/boot/ipxe?mac=52-54-00-12-34-56&uuid=0d0c0b0a-0f0e-0100-0203-040506070809&serial=To%20Be%20Filled%20By%20O.E.M.\
          &manufacturer=QEMU&product=Standard%20PC&asset=&platform=efi&arch=x86_64&ip=10.255.7.9{extra}"
     )
 }
@@ -332,4 +332,42 @@ async fn everything_survives_a_restart() {
     assert!(st.image("r").is_some_and(|i| !i.builtin));
     assert!(st.image("netboot.xyz").is_some_and(|i| i.builtin));
     assert!(st.events(None, 10).iter().any(|e| e.kind == "assigned"));
+}
+
+#[tokio::test]
+async fn probe_replies_go_to_the_doctor_not_the_device_list() {
+    let t = setup();
+    let mac = probe::probe_mac(42);
+    t.st.expect_probe(42);
+    let mut offer = Message::request(42, mac);
+    offer.op = 2;
+    offer.siaddr = Ipv4Addr::new(10, 255, 0, 5);
+    offer.file = b"bootbob".to_vec();
+    offer.set_opt(OPT_MESSAGE_TYPE, [2]);
+    offer.set_opt(OPT_SERVER_ID, [10, 255, 0, 1]);
+    t.st.observe(Seen::Dhcp {
+        src_mac: "f4:e2:c6:00:00:01".parse().unwrap(),
+        src_ip: Ipv4Addr::new(10, 255, 0, 1),
+        dst_ip: Ipv4Addr::BROADCAST,
+        from_server: true,
+        msg: offer,
+    });
+    let offers = t.st.take_probe(42);
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].boot_file.as_deref(), Some("bootbob"));
+    assert!(t.st.device(mac).is_none());
+    assert!(t.st.take_probe(42).is_empty());
+}
+
+#[tokio::test]
+async fn the_doctor_runs_without_a_listener() {
+    let t = setup();
+    let (s, body) = call(&t.st, Method::POST, "/api/doctor", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let r: Value = serde_json::from_str(&body).unwrap();
+    let status = |id: &str| r["checks"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap()["status"].clone();
+    assert_eq!(status("ipxe"), "warn", "arm64 build missing in the test dir");
+    assert_eq!(status("listener"), "warn");
+    assert_eq!(status("dhcp"), "skip");
+    assert_eq!(json(&t.st, "/api/doctor").await["checks"], r["checks"]);
 }

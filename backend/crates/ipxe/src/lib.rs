@@ -54,10 +54,14 @@ pub struct MenuTheme {
     pub muted: u32,
 }
 
-/// The query iPXE sends back about itself. Every value is URI-encoded by iPXE. `netX` is
-/// the interface iPXE last opened, i.e. the one it booted from, so a machine with two NICs
-/// reports the right MAC. `ipxe/embed.ipxe` sends the same query.
-pub const IDENTITY_QUERY: &str = "mac=${netX/mac:uristring}&uuid=${uuid:uristring}&serial=${serial:uristring}\
+/// The query iPXE sends back about itself. `netX` is the interface iPXE last opened, i.e.
+/// the one it booted from, so a machine with two NICs reports the right MAC.
+/// `ipxe/embed.ipxe` sends the same query.
+///
+/// A `:type` suffix re-formats a setting's *raw bytes*: `:uristring` is right for the
+/// SMBIOS text settings, but on `mac` or `uuid` (binary) it percent-encodes the bytes
+/// themselves. So the MAC goes as `:hexhyp` (`52-54-00-…`) and the UUID in its own format.
+pub const IDENTITY_QUERY: &str = "mac=${netX/mac:hexhyp}&uuid=${uuid}&serial=${serial:uristring}\
 &manufacturer=${manufacturer:uristring}&product=${product:uristring}&asset=${asset:uristring}\
 &platform=${platform}&arch=${buildarch}&ip=${netX/ip}";
 

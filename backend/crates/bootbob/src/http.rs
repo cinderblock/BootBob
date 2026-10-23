@@ -33,6 +33,7 @@ pub fn router(st: St) -> Router {
         .route("/api/images/{id}", put(put_image).delete(delete_image))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/events", get(list_events))
+        .route("/api/doctor", get(last_report).post(run_doctor))
         .route("/api/stream", get(stream))
         .route("/theme.css", get(theme_css))
         .nest_service("/files/ipxe", ServeDir::new(&st.config.ipxe_dir));
@@ -168,6 +169,12 @@ fn anonymous_menu(st: &State, base: String) -> String {
 async fn boot_ipxe(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>) -> Response {
     let base = base_url(&st, &headers);
     let Some(mac) = q.mac.as_deref().and_then(|m| m.parse::<Mac>().ok()) else {
+        // Worth seeing: an iPXE that isn't ours, or a broken identity query.
+        st.event(
+            None,
+            "error",
+            format!("A machine asked for a boot script without a usable MAC (mac={:?})", q.mac.as_deref().unwrap_or("")),
+        );
         return ipxe(anonymous_menu(&st, base));
     };
     let polling = q.poll.is_some();
@@ -264,9 +271,9 @@ async fn status(Ax(st): Ax<St>) -> Json<StatusOut> {
 pub struct DeviceView {
     #[serde(flatten)]
     device: Device,
-    code: String,
+    pub(crate) code: String,
     /// `at_menu`, `menu_idle`, `stuck`, `booted` or `seen`.
-    state: &'static str,
+    pub(crate) state: &'static str,
     summary: String,
     /// What it would get if it netbooted now.
     next: Next,
@@ -421,6 +428,16 @@ async fn stream(Ax(st): Ax<St>) -> Sse<impl Stream<Item = Result<SseEvent, Infal
         })
     });
     Sse::new(s).keep_alive(KeepAlive::default())
+}
+
+/// The last network check, or `null` before the first.
+async fn last_report(Ax(st): Ax<St>) -> Json<Option<crate::doctor::Report>> {
+    Json(st.report())
+}
+
+/// Runs the network check (a few seconds: it waits for DHCP offers).
+async fn run_doctor(Ax(st): Ax<St>) -> Json<crate::doctor::Report> {
+    Json(crate::doctor::run(&st).await)
 }
 
 async fn theme_css(Ax(st): Ax<St>) -> Response {
