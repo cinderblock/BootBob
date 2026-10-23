@@ -129,12 +129,15 @@ pub struct Settings {
     pub default_image: String,
     /// How often the fallback menu checks for an assignment.
     pub poll_secs: u32,
+    /// After this long at the menu untouched, boot the local disk, so a PC that merely
+    /// tries the network before its disk still starts normally. 0: wait forever.
+    pub menu_timeout_secs: u32,
     pub theme: Theme,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { default_image: "menu".into(), poll_secs: 10, theme: Theme::default() }
+        Settings { default_image: "menu".into(), poll_secs: 10, menu_timeout_secs: 120, theme: Theme::default() }
     }
 }
 

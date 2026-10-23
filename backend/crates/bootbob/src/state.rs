@@ -225,6 +225,9 @@ impl State {
         if !(3..=300).contains(&s.poll_secs) {
             return Err("poll_secs must be 3–300".into());
         }
+        if s.menu_timeout_secs != 0 && s.menu_timeout_secs < s.poll_secs * 2 {
+            return Err("menu_timeout_secs must be 0 (never) or at least two poll intervals".into());
+        }
         self.store.put(Table::Meta, "settings", &s).map_err(|e| e.to_string())?;
         *self.settings.write().unwrap() = s;
         self.notify(Change::Settings);

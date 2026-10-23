@@ -160,6 +160,11 @@ fn menu_script(st: &State, dev: &Device, base: String, status_line: String, poll
     })
 }
 
+/// `95 s` → `about 2 min`; under a minute, seconds.
+fn human_secs(s: u64) -> String {
+    if s < 60 { format!("{s} s") } else { format!("about {} min", s.div_ceil(60)) }
+}
+
 /// A machine with no usable identity: a menu without polling.
 fn anonymous_menu(st: &State, base: String) -> String {
     let dev = Device { mac: "unknown".into(), ..Default::default() };
@@ -195,17 +200,31 @@ async fn boot_ipxe(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>
             }
             _ => d.menu = Some(MenuState { since: now, last_poll: now, polls: 0 }),
         });
+        // Untouched for too long: boot the local disk, as the machine would have without
+        // BootBob. (A keypress stops the polling, so a menu someone is using never gets here.)
+        let since = st.device(mac).and_then(|d| d.menu).map(|m| m.since).unwrap_or(now);
+        let timeout_ms = settings.menu_timeout_secs as u64 * 1000;
+        if polling && timeout_ms > 0 && now.saturating_sub(since) >= timeout_ms {
+            st.record_boot(mac, "local", "nothing chosen at the menu in time", false);
+            return ipxe(bootbob_ipxe::boot(&bootbob_ipxe::Action::LocalDisk, "Nothing chosen; booting from local disk", &base));
+        }
+        let then = if timeout_ms > 0 {
+            let left = (settings.menu_timeout_secs as u64).saturating_sub(now.saturating_sub(since) / 1000);
+            format!("\nBoots from local disk in {} unless someone chooses (a key stops the clock).", human_secs(left))
+        } else {
+            String::new()
+        };
         let status = if failed {
             let what = dev.last_boot.as_ref().map(|b| b.title.clone()).unwrap_or_else(|| "the last image".into());
             if !polling {
                 st.event(Some(mac), "failed", format!("Booting {what} failed; back at the menu"));
             }
-            format!("Booting {what} failed. Choose something, or reassign it in the web UI.")
+            format!("Booting {what} failed.\nChoose something here, or reassign it in the web UI.{then}")
         } else {
             if !polling && !recently_at_menu {
                 st.event(Some(mac), "menu", format!("At the fallback menu ({})", res.reason));
             }
-            format!("No image assigned. Choose one here, or assign one in the web UI (checked every {} s).", settings.poll_secs)
+            format!("No image assigned: choose one here, or assign one in the web UI.{then}")
         };
         let dev = st.device(mac).unwrap_or(dev);
         return ipxe(menu_script(&st, &dev, base, status, true));

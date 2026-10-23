@@ -69,6 +69,7 @@ export interface Theme {
 export interface Settings {
   default_image: string;
   poll_secs: number;
+  menu_timeout_secs: number;
   theme: Theme;
 }
 

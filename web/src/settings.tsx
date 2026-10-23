@@ -65,6 +65,16 @@ export function SettingsView({ live }: { live: Live }) {
           />{" "}
           seconds
         </label>
+        <label title="So a PC that only tries the network before its disk still starts normally. A key at the menu stops the clock.">
+          If nobody chooses, boot the local disk after{" "}
+          <input
+            type="number"
+            min={0}
+            value={s.menu_timeout_secs}
+            onInput={(e) => setS({ ...s, menu_timeout_secs: Number(e.currentTarget.value) })}
+          />{" "}
+          seconds (0: wait forever)
+        </label>
 
         <h2>Theme</h2>
         <p className="muted">One theme for this page and the boot menu. The menu's colours show on graphical (UEFI) consoles.</p>

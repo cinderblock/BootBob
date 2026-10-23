@@ -32,7 +32,9 @@ assigned, or the fallback menu.
 
 ## The fallback menu
 
-- Check for an assignment now (the default, every 10 s until someone presses a key)
+- Check for an assignment now (the default, every 10 s until someone presses a key;
+  left untouched for 2 minutes, it boots the local disk, so a PC that merely tries the
+  network first still starts normally)
 - Boot from local disk
 - Images from the catalogue, grouped (netboot.xyz is built in)
 - Reboot, Power off, iPXE shell

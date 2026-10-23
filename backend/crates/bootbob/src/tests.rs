@@ -371,3 +371,28 @@ async fn the_doctor_runs_without_a_listener() {
     assert_eq!(status("dhcp"), "skip");
     assert_eq!(json(&t.st, "/api/doctor").await["checks"], r["checks"]);
 }
+
+#[tokio::test]
+async fn an_untouched_menu_gives_up_and_boots_the_local_disk() {
+    let t = setup();
+    let first = get(&t.st, &ident("")).await;
+    assert!(first.contains("item --gap Boots from local disk in about 2 min unless someone chooses"), "{first}");
+    // Pretend it has been polling for 2 minutes.
+    let mac: Mac = MAC.parse().unwrap();
+    t.st.edit_device(mac, |d| d.menu.as_mut().unwrap().since -= 121_000);
+    let script = get(&t.st, &ident("&poll=1")).await;
+    assert!(script.contains("sanboot --no-describe --drive 0x80 || exit"), "{script}");
+    let d = t.st.device(mac).unwrap();
+    assert_eq!(d.last_boot.unwrap().reason, "nothing chosen at the menu in time");
+    assert!(d.menu.is_none());
+
+    // With the timeout off, it waits forever.
+    let mut s = t.st.settings();
+    s.menu_timeout_secs = 0;
+    t.st.put_settings(s.clone()).unwrap();
+    get(&t.st, &ident("")).await;
+    t.st.edit_device(mac, |d| d.menu.as_mut().unwrap().since -= 3_600_000);
+    assert!(get(&t.st, &ident("&poll=1")).await.contains("choose --timeout"));
+    s.menu_timeout_secs = 5;
+    assert!(t.st.put_settings(s).is_err(), "shorter than two polls");
+}

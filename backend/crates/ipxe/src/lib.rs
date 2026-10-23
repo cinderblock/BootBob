@@ -73,7 +73,8 @@ pub struct Menu {
     pub title: String,
     /// Shown under the title: who this machine is to BootBob (code, name, IP).
     pub device_line: String,
-    /// Shown under that: why it got the menu, and what happens next.
+    /// Shown under that: why it got the menu, and what happens next. One menu line per
+    /// text line (iPXE's menu is about 76 columns wide).
     pub status_line: String,
     /// How often to poll for an assignment. 0 disables polling.
     pub poll_secs: u32,
@@ -143,7 +144,9 @@ pub fn menu(m: &Menu) -> String {
     s.push_str(":menu\n");
     let _ = writeln!(s, "menu {}", text(&m.title));
     let _ = writeln!(s, "item --gap {}", text(&m.device_line));
-    let _ = writeln!(s, "item --gap {}", text(&m.status_line));
+    for line in m.status_line.lines() {
+        let _ = writeln!(s, "item --gap {}", text(line));
+    }
     s.push_str("item --gap\n");
     s.push_str("item refresh Check for an assignment now\n");
     s.push_str("item local Boot from local disk\n");
