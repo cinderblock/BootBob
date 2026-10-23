@@ -70,8 +70,15 @@ pub enum Resolution {
 /// How a transfer ended, reported back to the resolver.
 #[derive(Debug, Clone)]
 pub enum Outcome {
-    Completed { bytes: u64, elapsed: Duration },
+    Completed {
+        bytes: u64,
+        elapsed: Duration,
+    },
     Failed(String),
+    /// The client stopped the transfer before any data, in answer to our option
+    /// acknowledgement. UEFI firmware does this routinely: it asks once only to learn the
+    /// file's size (`tsize`), then asks again for real.
+    Cancelled(String),
 }
 
 /// Decides what each read request gets.

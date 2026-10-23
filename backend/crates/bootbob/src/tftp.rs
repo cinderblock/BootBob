@@ -88,10 +88,8 @@ impl Resolver for Tftp {
 
         match Content::open(dir.join(&file)).await {
             Ok(c) => {
+                // The event comes when the transfer finishes (see `finished`).
                 self.note(mac, ip, &path, Some(file.clone()));
-                if let Some(m) = mac {
-                    self.st.event(Some(m), "tftp", format!("Loading iPXE ({file}) over TFTP"));
-                }
                 Resolution::Serve(c)
             }
             Err(e) => {
@@ -106,14 +104,28 @@ impl Resolver for Tftp {
 
     fn finished(&self, req: &Request, outcome: &Outcome) {
         let Some(mac) = v4(req.peer.ip()).and_then(|ip| self.st.mac_for(ip)) else { return };
-        let ok = matches!(outcome, Outcome::Completed { .. });
-        self.st.edit_device(mac, |d| {
+        let ok = match outcome {
+            Outcome::Completed { .. } => Some(true),
+            Outcome::Failed(_) => Some(false),
+            // A size query (UEFI asks once for tsize, then again for real): no verdict yet.
+            Outcome::Cancelled(_) => None,
+        };
+        let Some(dev) = self.st.edit_device(mac, |d| {
             if let Some(t) = &mut d.tftp {
-                t.ok = Some(ok);
+                t.ok = ok;
             }
-        });
-        if let Outcome::Failed(why) = outcome {
-            self.st.event(Some(mac), "error", format!("TFTP transfer of {} failed: {why}", req.raw_path));
+        }) else {
+            return;
+        };
+        let what = dev.tftp.and_then(|t| t.served).unwrap_or_else(|| req.raw_path.clone());
+        match outcome {
+            Outcome::Completed { bytes, elapsed } => self.st.event(
+                Some(mac),
+                "tftp",
+                format!("Sent {what} over TFTP ({} KB in {:.1} s)", bytes.div_ceil(1024), elapsed.as_secs_f64()),
+            ),
+            Outcome::Failed(why) => self.st.event(Some(mac), "error", format!("TFTP transfer of {what} failed: {why}")),
+            Outcome::Cancelled(_) => {}
         }
     }
 }

@@ -230,3 +230,16 @@ async fn refuses_writes() {
     let n = timeout(Duration::from_secs(5), sock.recv(&mut buf)).await.unwrap().unwrap();
     assert!(matches!(Packet::parse(&buf[..n]).unwrap(), Packet::Error { code: 2, .. }));
 }
+
+#[tokio::test]
+async fn a_size_query_that_aborts_is_cancelled_not_failed() {
+    let (addr, r) = server(&[("f", pattern(5000))], Config::default()).await;
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    sock.send_to(&Packet::rrq("f", &[("tsize", "0")]), addr).await.unwrap();
+    let mut buf = [0u8; 1500];
+    let (n, from) = timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await.unwrap().unwrap();
+    assert!(matches!(Packet::parse(&buf[..n]).unwrap(), Packet::OptionAck { .. }));
+    sock.send_to(&Packet::error(ErrorCode::OptionRefused, "User aborted the transfer"), from).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(matches!(&r.outcomes.lock().unwrap()[0], Outcome::Cancelled(m) if m.contains("aborted")));
+}

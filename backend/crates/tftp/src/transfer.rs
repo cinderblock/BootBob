@@ -114,13 +114,14 @@ pub(crate) async fn run<R: Resolver>(req: Request, options: Vec<(String, String)
     let started = Instant::now();
     let outcome = match send(&sock, content, &options, &config).await {
         Ok(bytes) => Outcome::Completed { bytes, elapsed: started.elapsed() },
-        Err(why) => Outcome::Failed(why),
+        Err(o) => o,
     };
     match &outcome {
         Outcome::Completed { bytes, elapsed } => {
             tracing::debug!(peer = %req.peer, path = %req.raw_path, bytes, ?elapsed, "TFTP: sent")
         }
         Outcome::Failed(why) => tracing::info!(peer = %req.peer, path = %req.raw_path, "TFTP: failed: {why}"),
+        Outcome::Cancelled(why) => tracing::debug!(peer = %req.peer, path = %req.raw_path, "TFTP: cancelled by the client: {why}"),
     }
     resolver.finished(&req, &outcome);
 }
@@ -152,31 +153,37 @@ async fn wait(sock: &UdpSocket, dur: Duration, buf: &mut [u8]) -> Result<Reply, 
     }
 }
 
-async fn send(sock: &UdpSocket, content: Content, options: &[(String, String)], config: &Config) -> Result<u64, String> {
+async fn send(sock: &UdpSocket, content: Content, options: &[(String, String)], config: &Config) -> Result<u64, Outcome> {
     let size = content.size();
     let n = negotiate(options, size, config);
     let mut buf = vec![0u8; 1024];
-    let io_err = |e: io::Error| format!("send failed: {e}");
+    let failed = Outcome::Failed;
 
     if let Some(oack) = &n.oack {
         let pkt = Packet::oack(oack);
         let mut tries = 0;
         loop {
-            sock.send(&pkt).await.map_err(io_err)?;
-            match wait(sock, n.timeout, &mut buf).await? {
+            sock.send(&pkt).await.map_err(|e| failed(format!("send failed: {e}")))?;
+            match wait(sock, n.timeout, &mut buf).await.map_err(failed)? {
                 Reply::Ack(0) => break,
                 Reply::Ack(_) => {}
-                Reply::Error(e) => return Err(e),
+                // UEFI firmware asks once just to learn the size (tsize), then aborts
+                // and asks again. Not a failure.
+                Reply::Error(e) => return Err(Outcome::Cancelled(e)),
                 Reply::Timeout => {
                     tries += 1;
                     if tries > config.retries {
-                        return Err("no ACK for the option acknowledgement".into());
+                        return Err(failed("no ACK for the option acknowledgement".into()));
                     }
                 }
             }
         }
     }
+    send_data(sock, content, &n, config, &mut buf).await.map_err(failed)
+}
 
+async fn send_data(sock: &UdpSocket, content: Content, n: &Negotiated, config: &Config, buf: &mut [u8]) -> Result<u64, String> {
+    let io_err = |e: io::Error| format!("send failed: {e}");
     let mut blocks = Blocks { content, offset: 0 };
     // Blocks base..next have been sent and not yet acknowledged; `window` holds them.
     // Block indices are absolute (from 1); the wire number is the index mod 65536, so a
@@ -194,7 +201,7 @@ async fn send(sock: &UdpSocket, content: Content, options: &[(String, String)], 
             window.push_back(block);
             next += 1;
         }
-        match wait(sock, n.timeout, &mut buf).await? {
+        match wait(sock, n.timeout, buf).await? {
             Reply::Ack(num) => {
                 // Find the newest in-flight block with this wire number. Older or duplicate
                 // ACKs match nothing and are ignored, which avoids the Sorcerer's Apprentice
