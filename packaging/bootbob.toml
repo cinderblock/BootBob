@@ -1,0 +1,11 @@
+# BootBob's config in the Docker image. Mount your own over it; everything is optional.
+data_dir = "/var/lib/bootbob"
+ipxe_dir = "/usr/share/bootbob/ipxe"
+web_dir = "/usr/share/bootbob/web"
+
+# Listen only on the LAN address, not every interface:
+# http = "10.255.0.5:8067"
+# tftp = "10.255.0.5:69"
+
+# The DHCP listener (receive-only) on the LAN interface:
+# interface = "eno1"

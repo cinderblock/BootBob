@@ -54,10 +54,12 @@ pub struct MenuTheme {
     pub muted: u32,
 }
 
-/// The query iPXE sends back about itself. Every value is URI-encoded by iPXE.
-pub const IDENTITY_QUERY: &str = "mac=${mac:uristring}&uuid=${uuid:uristring}&serial=${serial:uristring}\
+/// The query iPXE sends back about itself. Every value is URI-encoded by iPXE. `netX` is
+/// the interface iPXE last opened, i.e. the one it booted from, so a machine with two NICs
+/// reports the right MAC. `ipxe/embed.ipxe` sends the same query.
+pub const IDENTITY_QUERY: &str = "mac=${netX/mac:uristring}&uuid=${uuid:uristring}&serial=${serial:uristring}\
 &manufacturer=${manufacturer:uristring}&product=${product:uristring}&asset=${asset:uristring}\
-&platform=${platform}&arch=${buildarch}&ip=${ip}";
+&platform=${platform}&arch=${buildarch}&ip=${netX/ip}";
 
 /// The fallback menu.
 #[derive(Debug, Clone)]
@@ -104,7 +106,8 @@ fn urlencode(s: &str) -> String {
 fn theme_lines(s: &mut String, t: &MenuTheme) {
     // Palette slots: 0 black → background, 7 white → text, 4 blue → accent, 6 cyan → muted.
     // Pairs: 1 normal, 2 selected, 3 separator (iPXE's CPAIR_NORMAL/SELECT/SEPARATOR).
-    // An iPXE without COLOUR_CMD skips the block.
+    // `colour` and `cpair` come with CONSOLE_CMD (on in BootBob's builds, BIOS included); an
+    // iPXE without it skips the block.
     let _ = writeln!(s, "colour --rgb {:#08x} 0 || goto theme_done", t.background);
     let _ = writeln!(s, "colour --rgb {:#08x} 7 ||", t.text);
     let _ = writeln!(s, "colour --rgb {:#08x} 4 ||", t.accent);
@@ -122,7 +125,8 @@ fn theme_lines(s: &mut String, t: &MenuTheme) {
 /// reached, the built-in entries still work locally.
 ///
 /// With polling on, the menu re-fetches `/boot/ipxe?…&poll=1` every `poll_secs` until
-/// someone presses a key (iPXE's menu cancels its timeout on a keypress). That's how an
+/// someone presses a key (a keypress resets the timeout to `--retimeout`, which defaults to
+/// never, in `hci/tui/menu_ui.c`). That's how an
 /// assignment made in the web UI reaches a machine already sitting at the menu.
 pub fn menu(m: &Menu) -> String {
     let mut s = String::from("#!ipxe\n");
@@ -153,12 +157,16 @@ pub fn menu(m: &Menu) -> String {
     s.push_str("item poweroff Power off\n");
     s.push_str("item shell iPXE shell\n");
     if m.poll_secs > 0 {
-        let _ = writeln!(s, "choose --timeout {} --default refresh selected || goto refresh", m.poll_secs * 1000);
+        let _ = writeln!(s, "choose --timeout {} --default refresh selected || goto escaped", m.poll_secs * 1000);
     } else {
-        s.push_str("choose --default refresh selected || goto refresh\n");
+        s.push_str("choose --default refresh selected || goto escaped\n");
     }
     s.push_str("goto ${selected}\n");
 
+    // Esc, or a `choose` that fails outright (an old iPXE), lands here. Pause before
+    // refreshing, so a failing menu can't spin against the server.
+    s.push_str(":escaped\n");
+    s.push_str("sleep 3 ||\n");
     s.push_str(":refresh\n");
     s.push_str("chain --replace --autofree ${bootbob}/boot/ipxe?${bootbob-id}&poll=1 || goto unreachable\n");
 
@@ -255,6 +263,12 @@ mod tests {
     }
 
     #[test]
+    fn the_embedded_script_sends_the_same_identity() {
+        let embed = include_str!("../../../../ipxe/embed.ipxe");
+        assert!(embed.contains(&format!("/boot/ipxe?{IDENTITY_QUERY} ")), "ipxe/embed.ipxe's query drifted from IDENTITY_QUERY");
+    }
+
+    #[test]
     fn strips_what_ipxe_would_interpret() {
         assert_eq!(text("${root} pc\n{x}"), "root pcx");
         assert_eq!(text("--timeout 0"), "timeout 0");
@@ -265,7 +279,8 @@ mod tests {
     fn menu_polls_and_has_power_entries() {
         let s = menu(&sample());
         assert!(s.starts_with("#!ipxe\n"));
-        assert!(s.contains("choose --timeout 10000 --default refresh selected || goto refresh"));
+        assert!(s.contains("choose --timeout 10000 --default refresh selected || goto escaped"));
+        assert!(s.contains(":escaped\nsleep 3 ||\n:refresh\n"));
         assert!(s.contains("item reboot Reboot"));
         assert!(s.contains("item poweroff Power off"));
         assert!(s.contains(":reboot_here\nreboot\n"));
@@ -316,7 +331,7 @@ mod tests {
         assert!(k.contains(":failed"));
         assert!(boot(&Action::Reboot, "x", "http://b").ends_with("\nreboot\n"));
         let script = boot(&Action::Script { script: "#!ipxe\r\necho hi".into() }, "x", "http://b");
-        assert!(script.ends_with("&ip=${ip}\necho hi\n"), "{script}");
+        assert!(script.ends_with("&ip=${netX/ip}\necho hi\n"), "{script}");
         assert!(boot(&Action::LocalDisk, "Local disk", "http://b").contains("sanboot --no-describe --drive 0x80 || exit"));
     }
 }

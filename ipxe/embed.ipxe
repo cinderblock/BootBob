@@ -1,0 +1,33 @@
+#!ipxe
+# BootBob's embedded script: the first thing every BootBob iPXE build runs.
+#
+# It finds the server and asks it what this machine should boot. The server is the
+# `bootbob-url` setting if something set it (a USB stick's config, say), else the DHCP
+# next-server on BootBob's HTTP port. The query matches IDENTITY_QUERY in
+# backend/crates/ipxe/src/lib.rs (a test checks).
+
+isset ${bootbob-url} && goto ask ||
+
+:dhcp
+dhcp && goto have_address ||
+echo BootBob: no DHCP answer; trying again in 5 seconds
+sleep 5 || shell
+goto dhcp
+
+:have_address
+isset ${next-server} || goto no_server
+set bootbob-url http://${next-server}:8067
+
+:ask
+chain --replace --autofree ${bootbob-url}/boot/ipxe?mac=${netX/mac:uristring}&uuid=${uuid:uristring}&serial=${serial:uristring}&manufacturer=${manufacturer:uristring}&product=${product:uristring}&asset=${asset:uristring}&platform=${platform}&arch=${buildarch}&ip=${netX/ip} || goto unreachable
+
+:unreachable
+echo BootBob: can't reach ${bootbob-url}; trying again in 10 seconds (Ctrl-C for a shell)
+sleep 10 || shell
+goto ask
+
+:no_server
+echo BootBob: DHCP gave no boot server (next-server), so this iPXE doesn't know where
+echo BootBob is. Set the network's boot server, or type: set bootbob-url http://<server>:8067
+shell
+goto ask
