@@ -59,6 +59,18 @@ serves them from the **Pi image** assigned to it (or the Pi default in Settings)
 - **`cmdline.txt`** can be replaced and **`config.txt`** added to, per image, with
   `{serial}`, `{mac}`, `{ip}` and `{server}` filled in for each Pi.
 
+### Network roots (NBD)
+
+With `nbd = "<address>:10809"` in the config, BootBob also serves disk images as network
+block devices, so a Pi can run with no SD card at all. Make one disk image hold the whole
+system (a FAT boot partition and the root filesystem), and use it as the Pi image's boot
+files too: TFTP reads the kernel out of it, and the initramfs mounts its root over NBD
+with `nbd-client` (`root=/dev/nbd0p2 nbdroot=<server>,<disk>.img,nbd0 ip=dhcp`). Kernel
+updates the Pi installs land in the same image, so the next boot uses them.
+
+A disk image is exported only to the machine assigned the Pi image it belongs to (or the
+one running it now). `POST /api/disks` creates an empty one to fill over NBD.
+
 Every file of one boot comes from the image it started with, so a "next boot only"
 assignment lasts the whole boot. A Pi with nothing to boot gets nothing, keeps asking, and
 shows up in the web UI as waiting.
@@ -79,6 +91,7 @@ ipxe_dir = "/usr/share/bootbob/ipxe"
 web_dir = "/usr/share/bootbob/web"
 http = "10.255.0.5:8067"   # listen on the LAN address only
 tftp = "10.255.0.5:69"
+nbd = "10.255.0.5:10809"   # network roots; leave out to turn it off
 interface = "eno1"         # the DHCP listener; leave out to turn it off
 ```
 
@@ -89,7 +102,7 @@ Without a config, BootBob serves HTTP on `:8067` and TFTP on `:69` from `./data`
 
 | Path | What |
 | --- | --- |
-| `backend/` | Rust workspace: `bootbob` (the server), `bootbob-tftp`, `bootbob-dhcp`, `bootbob-ipxe`, `bootbob-pi` |
+| `backend/` | Rust workspace: `bootbob` (the server), `bootbob-tftp`, `bootbob-dhcp`, `bootbob-ipxe`, `bootbob-pi`, `bootbob-nbd` |
 | `web/` | The web UI: Preact (via preact/compat), Vite, TypeScript, Bun |
 | `ipxe/` | iPXE build: pinned commit, embedded script, build options |
 | `e2e/` | End-to-end test: SeaBIOS and OVMF VMs netboot from BootBob in QEMU |
@@ -119,6 +132,7 @@ for throwaway VMs.
 | `PUT /api/devices/{mac}/assignment` | `{"image": "debian", "once": true}` |
 | `DELETE /api/devices/{mac}/assignment` | Back to the default |
 | `GET /api/images`, `PUT/DELETE /api/images/{id}` | The catalogue: an iPXE `action` (kernel, chain or script), a Raspberry Pi boot tree (`pi`), or both |
+| `POST /api/disks` | `{"name": "desky.img", "size": <bytes>}`: an empty disk image to fill over NBD |
 | `GET /api/pi/sources` | Directories and disk images in the images directory, with the Pi boot files each has |
 | `GET/PUT /api/settings` | Default image (PCs and Pis), menu poll interval, theme |
 | `GET /api/events` | The log |

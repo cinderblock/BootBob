@@ -7,6 +7,7 @@ mod config;
 mod doctor;
 mod http;
 mod model;
+mod nbd;
 mod state;
 mod store;
 mod tftp;
@@ -78,6 +79,21 @@ async fn main() -> anyhow::Result<()> {
             // Port 69 needs root or CAP_NET_BIND_SERVICE. Carry on without it: iPXE over
             // HTTP still works.
             Err(e) => tracing::error!(%addr, "TFTP: can't listen, so firmware PXE won't work: {e}"),
+        }
+    }
+
+    if let Some(addr) = config.nbd {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => {
+                tracing::info!(%addr, "NBD: listening");
+                let exports = Arc::new(nbd::Nbd { st: st.clone() });
+                tokio::spawn(async move {
+                    if let Err(e) = bootbob_nbd::serve(l, exports).await {
+                        tracing::error!("NBD stopped: {e}");
+                    }
+                });
+            }
+            Err(e) => tracing::error!(%addr, "NBD: can't listen, so network roots won't work: {e}"),
         }
     }
 

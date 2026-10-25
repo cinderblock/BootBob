@@ -33,6 +33,7 @@ pub fn router(st: St) -> Router {
         .route("/api/images", get(list_images))
         .route("/api/images/{id}", put(put_image).delete(delete_image))
         .route("/api/pi/sources", get(pi_sources))
+        .route("/api/disks", axum::routing::post(create_disk))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/events", get(list_events))
         .route("/api/doctor", get(last_report).post(run_doctor))
@@ -441,6 +442,18 @@ async fn put_image(Ax(st): Ax<St>, Path(id): Path<String>, Json(mut img): Json<I
 async fn pi_sources(Ax(st): Ax<St>) -> Json<Vec<bootbob_pi::SourceInfo>> {
     let dir = st.config.images_dir();
     Json(tokio::task::spawn_blocking(move || bootbob_pi::scan(&dir)).await.unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+struct NewDisk {
+    name: String,
+    /// Bytes.
+    size: u64,
+}
+
+async fn create_disk(Ax(st): Ax<St>, Json(d): Json<NewDisk>) -> Result<StatusCode, ApiError> {
+    crate::nbd::create_disk(&st, &d.name, d.size).map_err(bad)?;
+    Ok(StatusCode::CREATED)
 }
 
 async fn delete_image(Ax(st): Ax<St>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {

@@ -1,0 +1,15 @@
+[package]
+name = "bootbob-nbd"
+description = "NBD server: disk image files as network block devices, for network root filesystems"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

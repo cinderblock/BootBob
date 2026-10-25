@@ -548,3 +548,43 @@ async fn pi_images_are_checked_and_kept_apart_from_pcs() {
     assert_eq!(v[0]["kind"], "directory");
     assert_eq!(v[0]["boot_files"], json!(["start4.elf", "config.txt", "cmdline.txt"]));
 }
+
+// ---- NBD exports ----
+
+#[tokio::test]
+async fn nbd_exports_go_only_to_the_machine_assigned_the_disk() {
+    use bootbob_nbd::Exports;
+    let t = setup();
+    let (s, body) = call(&t.st, Method::POST, "/api/disks", Some(json!({"name": "desky.img", "size": 1u64 << 30}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(std::fs::metadata(t.st.config.images_dir().join("desky.img")).unwrap().len(), 1 << 30);
+    let (s, _) = call(&t.st, Method::POST, "/api/disks", Some(json!({"name": "desky.img", "size": 1u64 << 30}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "never overwrites");
+    for bad in
+        [json!({"name": "../x.img", "size": 1u64 << 30}), json!({"name": "x.img", "size": 4096}), json!({"name": "x", "size": 1u64 << 30})]
+    {
+        assert_eq!(call(&t.st, Method::POST, "/api/disks", Some(bad.clone())).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    let (s, body) = put_pi_image(&t, "desky", json!({"source": "desky.img"})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let desky: Mac = PI.parse().unwrap();
+    let other: Mac = "dc:a6:32:09:09:09".parse().unwrap();
+    t.st.learn_address(Ipv4Addr::from(PI_IP), desky);
+    t.st.learn_address(Ipv4Addr::new(10, 255, 7, 50), other);
+    t.st.assign(desky, Some(Assignment { image: "desky".into(), once: true, set_at: 0 })).unwrap();
+    t.st.update_device(other, |_| {});
+
+    let nbd = crate::nbd::Nbd { st: t.st.clone() };
+    let peer = |ip: [u8; 4]| SocketAddr::from((ip, 40000));
+    assert_eq!(nbd.list(peer(PI_IP)), vec!["desky.img"]);
+    assert!(nbd.open("desky.img", peer(PI_IP)).is_ok());
+    assert!(nbd.open("desky.img", peer([10, 255, 7, 50])).unwrap_err().contains("isn't the disk"));
+    assert!(nbd.open("desky.img", peer([10, 255, 7, 99])).unwrap_err().contains("doesn't know which machine"));
+    assert!(nbd.open("nope.img", peer(PI_IP)).unwrap_err().contains("no export"));
+
+    // A one-shot assignment is used up when the boot starts; the running image still counts.
+    t.st.record_boot(desky, "desky", "one-shot assignment", true);
+    assert!(t.st.device(desky).unwrap().assignment.is_none());
+    assert!(nbd.open("desky.img", peer(PI_IP)).is_ok());
+}

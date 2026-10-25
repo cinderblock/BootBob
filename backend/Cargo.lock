@@ -93,6 +93,7 @@ dependencies = [
  "axum",
  "bootbob-dhcp",
  "bootbob-ipxe",
+ "bootbob-nbd",
  "bootbob-pi",
  "bootbob-tftp",
  "bytes",
@@ -125,6 +126,15 @@ name = "bootbob-ipxe"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bootbob-nbd"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

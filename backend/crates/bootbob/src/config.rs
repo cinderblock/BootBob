@@ -22,6 +22,9 @@ pub struct Config {
     pub http: SocketAddr,
     /// TFTP, for firmware PXE and Raspberry Pis. `None` turns it off.
     pub tftp: Option<SocketAddr>,
+    /// NBD, for network root filesystems (port 10809 is NBD's own). `None` (the
+    /// default) turns it off.
+    pub nbd: Option<SocketAddr>,
     /// The interface the DHCP listener watches. `None` turns it off.
     pub interface: Option<String>,
     /// The URL machines use to reach BootBob. Unset: taken from each request's `Host`.
@@ -46,6 +49,7 @@ impl Default for Config {
             data_dir: PathBuf::from("data"),
             http: "0.0.0.0:8067".parse().unwrap(),
             tftp: Some("0.0.0.0:69".parse().unwrap()),
+            nbd: None,
             interface: None,
             public_url: None,
             boot_filename: "bootbob".into(),
