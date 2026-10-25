@@ -176,8 +176,19 @@ pub async fn serve_with<E: Exports>(listener: TcpListener, exports: Arc<E>, live
     }
 }
 
+/// A machine that loses power or is killed never closes its connection, and an idle NBD
+/// client sends nothing, so without keepalives a dead connection looks open for hours
+/// (and its overlay can't be reset). With these, it's noticed in about half a minute.
+fn keepalive(sock: &TcpStream) -> io::Result<()> {
+    let ka = socket2::TcpKeepalive::new().with_time(std::time::Duration::from_secs(15)).with_interval(std::time::Duration::from_secs(5));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let ka = ka.with_retries(3);
+    socket2::SockRef::from(sock).set_tcp_keepalive(&ka)
+}
+
 async fn connection<E: Exports>(mut sock: TcpStream, peer: SocketAddr, exports: Arc<E>, live: Arc<Live>) -> io::Result<()> {
     sock.set_nodelay(true)?;
+    keepalive(&sock)?;
     let Some((export, disk)) = negotiate(&mut sock, peer, &*exports).await? else { return Ok(()) };
     let size = disk.size();
 

@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 bootbob-cow.workspace = true
+socket2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

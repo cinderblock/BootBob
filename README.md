@@ -127,7 +127,7 @@ Without a config, BootBob serves HTTP on `:8067` and TFTP on `:69` from `./data`
 | `web/` | The web UI: Preact (via preact/compat), Vite, TypeScript, Bun |
 | `ipxe/` | iPXE build: pinned commit, embedded script, build options |
 | `e2e/` | End-to-end test: SeaBIOS and OVMF VMs netboot from BootBob in QEMU |
-| `tools/` | `pi-clone-to-nbd.sh`: clone a running Pi onto a BootBob NBD disk, to run it diskless |
+| `tools/` | `pi-clone-to-nbd.sh`: clone a running Pi onto a BootBob NBD disk, to run it diskless. `make-pc-golden.sh`: build a Debian disk image a PC runs from over the network |
 
 ## Development
 

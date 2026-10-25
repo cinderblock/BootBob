@@ -142,6 +142,7 @@ name = "bootbob-nbd"
 version = "0.1.0"
 dependencies = [
  "bootbob-cow",
+ "socket2",
  "tempfile",
  "tokio",
  "tracing",
