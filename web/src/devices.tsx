@@ -121,7 +121,7 @@ function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) 
 
   const run = (p: Promise<unknown>) => p.then(() => setError(null), (e: Error) => setError(e.message));
   // A Pi boots only images with Pi boot files; a PC only those with an iPXE action.
-  const bootable = live.images.filter((i) => (isPi ? i.pi !== null : i.action !== null || i.id === "menu"));
+  const bootable = live.images.filter((i) => (isPi ? i.pi !== null : i.action !== null || i.disk !== null || i.id === "menu"));
 
   return (
     <div className="device-detail">

@@ -46,7 +46,7 @@ export function SettingsView({ live }: { live: Live }) {
           Machines with no assignment get{" "}
           <select value={s.default_image} onChange={(e) => setS({ ...s, default_image: e.currentTarget.value })}>
             {live.images
-              .filter((i) => i.action !== null || i.id === "menu")
+              .filter((i) => i.action !== null || i.disk !== null || i.id === "menu")
               .map((i) => (
                 <option key={i.id} value={i.id}>
                   {i.title}

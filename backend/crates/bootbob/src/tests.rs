@@ -321,6 +321,7 @@ async fn everything_survives_a_restart() {
             group: String::new(),
             action: Some(bootbob_ipxe::Action::Reboot),
             pi: None,
+            disk: None,
             builtin: false,
         })
         .unwrap();
@@ -659,4 +660,93 @@ async fn a_cow_image_gives_each_pi_its_own_overlay() {
     let (s, _) = call(&t.st, Method::DELETE, &format!("/api/devices/{PI}/overlays/golden.img"), None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert!(json(&t.st, &format!("/api/devices/{PI}/overlays")).await.as_array().unwrap().is_empty());
+}
+
+// ---- PC disk boot ----
+
+/// A bare FAT "disk image" holding a kernel and initrd, the way a PC golden image's boot
+/// partition does.
+fn pc_disk(t: &T, name: &str) {
+    let mut disk = std::io::Cursor::new(vec![0u8; 4 << 20]);
+    fatfs::format_volume(&mut disk, fatfs::FormatVolumeOptions::new()).unwrap();
+    {
+        let fs = fatfs::FileSystem::new(&mut disk, fatfs::FsOptions::new()).unwrap();
+        let root = fs.root_dir();
+        std::io::Write::write_all(&mut root.create_file("vmlinuz").unwrap(), b"KERNEL").unwrap();
+        std::io::Write::write_all(&mut root.create_file("initrd.img").unwrap(), b"INITRD").unwrap();
+    }
+    std::fs::write(t.st.config.images_dir().join(name), disk.into_inner()).unwrap();
+}
+
+#[tokio::test]
+async fn a_pc_boots_a_disk_image_with_its_root_over_nbd() {
+    use bootbob_nbd::Exports;
+    let t = setup();
+    pc_disk(&t, "debian.img");
+    let img = json!({
+        "title": "Debian (network root)",
+        "group": "Systems",
+        "disk": {"source": "debian.img", "initrd": "initrd.img", "cmdline": "root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp", "cow": true}
+    });
+    let (s, body) = call(&t.st, Method::PUT, "/api/images/debian", Some(img.clone())).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    // Both an action and a disk is ambiguous; a disk needs a disk image.
+    let mut both = img.clone();
+    both["action"] = json!({"kind": "reboot"});
+    assert_eq!(call(&t.st, Method::PUT, "/api/images/both", Some(both)).await.0, StatusCode::BAD_REQUEST);
+
+    // It's in the PC menu, and an assigned PC gets kernel + initrd from the image.
+    let first = get(&t.st, &ident("")).await;
+    assert!(first.contains("item img_debian"), "{first}");
+    call(&t.st, Method::PUT, &format!("/api/devices/{MAC}/assignment"), Some(json!({"image": "debian"}))).await;
+    let script = get(&t.st, &ident("&poll=1")).await;
+    assert!(
+        script.contains("kernel http://10.255.0.5:8067/boot/disk/debian/vmlinuz?mac=52-54-00-12-34-56 root=/dev/nbd0p2 nbdroot=10.255.0.5,debian.img,nbd0 ip=dhcp || goto failed"),
+        "{script}"
+    );
+    assert!(script.contains("initrd http://10.255.0.5:8067/boot/disk/debian/initrd.img?mac=52-54-00-12-34-56 || goto failed"), "{script}");
+
+    // The files themselves, straight from the image's boot partition.
+    assert_eq!(get(&t.st, "/boot/disk/debian/vmlinuz?mac=52-54-00-12-34-56").await, "KERNEL");
+    assert_eq!(get(&t.st, "/boot/disk/debian/initrd.img").await, "INITRD");
+    assert_eq!(call(&t.st, Method::GET, "/boot/disk/debian/nope", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&t.st, Method::GET, "/boot/disk/nope/vmlinuz", None).await.0, StatusCode::NOT_FOUND);
+
+    // NBD: the assigned PC gets the disk, through its own overlay; nobody else does.
+    let mac: Mac = MAC.parse().unwrap();
+    t.st.learn_address(Ipv4Addr::new(10, 255, 7, 9), mac);
+    let nbd = crate::nbd::Nbd { st: t.st.clone() };
+    let ex = nbd.open("debian.img", SocketAddr::from(([10, 255, 7, 9], 40000))).unwrap();
+    assert!(ex.overlay.is_some());
+    let other: Mac = "52:54:00:00:00:99".parse().unwrap();
+    t.st.learn_address(Ipv4Addr::new(10, 255, 7, 99), other);
+    t.st.update_device(other, |_| {});
+    assert!(nbd.open("debian.img", SocketAddr::from(([10, 255, 7, 99], 40000))).is_err());
+}
+
+#[tokio::test]
+async fn disk_images_can_be_uploaded_and_deleted() {
+    let t = setup();
+    let up = |name: &str, body: &'static [u8]| {
+        let st = t.st.clone();
+        let uri = format!("/api/disks/{name}");
+        async move {
+            let req = Request::builder().method(Method::PUT).uri(uri).body(Body::from(body)).unwrap();
+            router(st).oneshot(req).await.unwrap().status()
+        }
+    };
+    assert_eq!(up("small.img", b"0123456789").await, StatusCode::CREATED);
+    assert_eq!(std::fs::read(t.st.config.images_dir().join("small.img")).unwrap(), b"0123456789");
+    assert_eq!(up("small.img", b"again").await, StatusCode::CONFLICT, "never overwrites");
+    assert_eq!(up("bad%20name.img", b"x").await, StatusCode::BAD_REQUEST);
+    assert_eq!(up("empty.img", b"").await, StatusCode::BAD_REQUEST);
+    assert!(!t.st.config.images_dir().join("empty.img").exists());
+    assert!(!t.st.config.images_dir().join(".empty.img.upload").exists());
+
+    // In use by an image: kept. Unused: deleted.
+    pc_disk(&t, "used.img");
+    call(&t.st, Method::PUT, "/api/images/used", Some(json!({"title": "Used", "disk": {"source": "used.img"}}))).await;
+    assert_eq!(call(&t.st, Method::DELETE, "/api/disks/used.img", None).await.0, StatusCode::CONFLICT);
+    assert_eq!(call(&t.st, Method::DELETE, "/api/disks/small.img", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&t.st, Method::DELETE, "/api/disks/small.img", None).await.0, StatusCode::NOT_FOUND);
 }

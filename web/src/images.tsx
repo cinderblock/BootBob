@@ -1,20 +1,22 @@
 import { useEffect, useState } from "react";
-import { api, type Action, type Image, type PiBoot, type PiSource } from "./api";
+import { api, type Action, type DiskBoot, type Image, type PiBoot, type PiSource } from "./api";
 import type { Live } from "./live";
 
-type Kind = Action["kind"] | "pi";
+type Kind = Action["kind"] | "pi" | "disk";
 
 const kinds: { kind: Kind; label: string }[] = [
   { kind: "kernel", label: "Linux kernel + initrd" },
   { kind: "chain", label: "Chain a URL (iPXE script or EFI binary)" },
   { kind: "script", label: "iPXE script" },
+  { kind: "disk", label: "PC: a whole system from a disk image (root over NBD)" },
   { kind: "pi", label: "Raspberry Pi boot files" },
 ];
 
 function describeImage(i: Image): string {
-  const pi = i.pi ? `Pi boot files from ${i.pi.source}` : null;
-  if (!i.action) return pi ?? "the fallback menu";
-  return pi ? `${describeAction(i.action)}; ${pi}` : describeAction(i.action);
+  const cow = (on: boolean) => (on ? ", copy-on-write" : "");
+  const pc = i.action ? describeAction(i.action) : i.disk ? `disk ${i.disk.source}, root over NBD${cow(i.disk.cow)}` : null;
+  const pi = i.pi ? `Pi boot files from ${i.pi.source}${cow(i.pi.cow)}` : null;
+  return [pc, pi].filter(Boolean).join("; ") || "the fallback menu";
 }
 
 function describeAction(a: Action): string {
@@ -50,7 +52,11 @@ const blank = (): Draft => ({
   piCmdline: "",
   piConfig: "",
   piCow: false,
+  diskKernel: "vmlinuz",
+  diskInitrd: "initrd.img",
+  diskCmdline: "root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp",
   keepAction: null,
+  keepDisk: null,
   keepPi: null,
 });
 
@@ -68,13 +74,21 @@ interface Draft {
   piCmdline: string;
   piConfig: string;
   piCow: boolean;
+  diskKernel: string;
+  diskInitrd: string;
+  diskCmdline: string;
+  keepDisk: DiskBoot | null;
   /** The half the editor isn't showing, kept as it was: an image can have both. */
   keepAction: Action | null;
   keepPi: PiBoot | null;
 }
 
 function toDraft(i: Image): Draft {
-  const d = { ...blank(), id: i.id, title: i.title, group: i.group, keepAction: i.action, keepPi: i.pi };
+  const d = { ...blank(), id: i.id, title: i.title, group: i.group, keepAction: i.action, keepPi: i.pi, keepDisk: i.disk };
+  if (i.disk) {
+    const k = i.disk;
+    return { ...d, kind: "disk", source: k.source, diskKernel: k.kernel, diskInitrd: k.initrd, diskCmdline: k.cmdline, piCow: k.cow };
+  }
   if (i.pi && !i.action) return { ...d, kind: "pi", source: i.pi.source, piCmdline: i.pi.cmdline, piConfig: i.pi.config, piCow: i.pi.cow };
   const a = i.action;
   if (a?.kind === "chain") return { ...d, kind: "chain", url: a.url };
@@ -84,11 +98,19 @@ function toDraft(i: Image): Draft {
 }
 
 /** The image's `action` and `pi` from the editor. */
-function toBoot(d: Draft): { action: Action | null; pi: PiBoot | null } {
+function toBoot(d: Draft): { action: Action | null; pi: PiBoot | null; disk: DiskBoot | null } {
   if (d.kind === "pi") {
-    return { action: d.keepAction, pi: { source: d.source.trim(), cmdline: d.piCmdline.trim(), config: d.piConfig.trim(), cow: d.piCow } };
+    return {
+      action: d.keepAction,
+      pi: { source: d.source.trim(), cmdline: d.piCmdline.trim(), config: d.piConfig.trim(), cow: d.piCow },
+      disk: d.keepDisk,
+    };
   }
-  return { action: toAction(d), pi: d.keepPi };
+  if (d.kind === "disk") {
+    const disk = { source: d.source.trim(), kernel: d.diskKernel.trim(), initrd: d.diskInitrd.trim(), cmdline: d.diskCmdline.trim(), cow: d.piCow };
+    return { action: null, pi: d.keepPi, disk };
+  }
+  return { action: toAction(d), pi: d.keepPi, disk: null };
 }
 
 function toAction(d: Draft): Action {
@@ -115,7 +137,7 @@ export function Images({ live }: { live: Live }) {
   const [error, setError] = useState<string | null>(null);
   const [sources, setSources] = useState<PiSource[]>([]);
   const set = (patch: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...patch } : d));
-  const editingPi = draft?.kind === "pi";
+  const editingPi = draft?.kind === "pi" || draft?.kind === "disk";
   useEffect(() => {
     if (editingPi) api.piSources().then(setSources, () => setSources([]));
   }, [editingPi]);
@@ -272,6 +294,48 @@ export function Images({ live }: { live: Live }) {
                 Both can use {"{serial}"}, {"{mac}"}, {"{ip}"} and {"{server}"}, filled in for each Pi.
               </p>
               <label title="One golden image for any number of Pis: each writes to its own overlay, and the image stays pristine. Needs a disk image (.img), served over NBD.">
+                <input type="checkbox" checked={draft.piCow} onChange={(e) => set({ piCow: e.currentTarget.checked })} /> Copy-on-write: each
+                machine gets its own overlay, the image is never written
+              </label>
+            </>
+          )}
+          {draft.kind === "disk" && (
+            <>
+              <label>
+                Disk image{" "}
+                <input
+                  required
+                  list="disk-sources"
+                  value={draft.source}
+                  onInput={(e) => set({ source: e.currentTarget.value })}
+                  placeholder="an .img in the images directory"
+                />
+                <datalist id="disk-sources">
+                  {sources
+                    .filter((s) => s.kind === "disk_image")
+                    .map((s) => (
+                      <option key={s.path} value={s.path} />
+                    ))}
+                </datalist>
+              </label>
+              <p className="muted small">
+                The image holds a FAT boot partition with the kernel and initrd, and the root filesystem, which the initrd mounts over
+                NBD. iPXE fetches the kernel and initrd from BootBob over HTTP.
+              </p>
+              <label>
+                Kernel <input className="mono" required value={draft.diskKernel} onInput={(e) => set({ diskKernel: e.currentTarget.value })} />
+              </label>
+              <label>
+                Initrd (empty: none) <input className="mono" value={draft.diskInitrd} onInput={(e) => set({ diskInitrd: e.currentTarget.value })} />
+              </label>
+              <label>
+                Kernel command line{" "}
+                <input className="mono" value={draft.diskCmdline} onInput={(e) => set({ diskCmdline: e.currentTarget.value })} />
+              </label>
+              <p className="muted small">
+                {"{server}"} is BootBob's NBD address and {"{disk}"} the image's file name; {"{mac}"} and {"{ip}"} are the machine's.
+              </p>
+              <label title="One golden image for any number of PCs: each writes to its own overlay, and the image stays pristine.">
                 <input type="checkbox" checked={draft.piCow} onChange={(e) => set({ piCow: e.currentTarget.checked })} /> Copy-on-write: each
                 machine gets its own overlay, the image is never written
               </label>

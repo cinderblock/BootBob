@@ -57,6 +57,7 @@ export interface Image {
   group: string;
   action: Action | null;
   pi: PiBoot | null;
+  disk: DiskBoot | null;
   builtin: boolean;
 }
 
@@ -66,6 +67,15 @@ export interface PiBoot {
   cmdline: string;
   config: string;
   /** Each machine gets its own copy-on-write overlay; the image itself is never written. */
+  cow: boolean;
+}
+
+/** A PC booting a whole system from a disk image: kernel and initrd from its boot partition, root over NBD. */
+export interface DiskBoot {
+  source: string;
+  kernel: string;
+  initrd: string;
+  cmdline: string;
   cow: boolean;
 }
 

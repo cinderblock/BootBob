@@ -26,6 +26,7 @@ pub fn router(st: St) -> Router {
     let mut r = Router::new()
         .route("/boot/ipxe", get(boot_ipxe))
         .route("/boot/ipxe/chose", get(boot_chose))
+        .route("/boot/disk/{image}/{*path}", get(disk_file))
         .route("/api/status", get(status))
         .route("/api/devices", get(list_devices))
         .route("/api/devices/{mac}", get(get_device).patch(patch_device).delete(delete_device))
@@ -36,6 +37,7 @@ pub fn router(st: St) -> Router {
         .route("/api/images/{id}", put(put_image).delete(delete_image))
         .route("/api/pi/sources", get(pi_sources))
         .route("/api/disks", axum::routing::post(create_disk))
+        .route("/api/disks/{name}", put(upload_disk).delete(delete_disk))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/events", get(list_events))
         .route("/api/doctor", get(last_report).post(run_doctor))
@@ -144,7 +146,7 @@ fn menu_script(st: &State, dev: &Device, base: String, status_line: String, poll
     let settings = st.settings();
     let mut groups: Vec<(String, Vec<MenuItem>)> = Vec::new();
     for img in st.images() {
-        if img.group.is_empty() || img.action.is_none() {
+        if img.group.is_empty() || (img.action.is_none() && img.disk.is_none()) {
             continue;
         }
         let item = MenuItem { id: img.id.clone(), title: img.title.clone() };
@@ -235,7 +237,7 @@ async fn boot_ipxe(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>
         return ipxe(menu_script(&st, &dev, base, status, true));
     }
 
-    let Some(action) = st.image(&res.image).and_then(|i| i.action) else {
+    let Some(action) = st.image(&res.image).and_then(|i| pc_action(&st, &i, mac, &base)) else {
         let why = match st.image(&res.image) {
             Some(i) if i.pi.is_some() => format!(
                 "{} is for Raspberry Pis only.
@@ -251,6 +253,80 @@ Choose something here, or reassign it in the web UI.",
     ipxe(bootbob_ipxe::boot(&action, &title, &base))
 }
 
+/// BootBob's address for NBD, as a machine reaches it: the configured NBD address,
+/// else the host in `base` (the URL the machine fetched its script from).
+fn nbd_server(st: &State, base: &str) -> String {
+    match st.config.nbd {
+        Some(a) if !a.ip().is_unspecified() => a.ip().to_string(),
+        _ => {
+            let host = base.split("://").nth(1).unwrap_or(base);
+            let host = host.split('/').next().unwrap_or(host);
+            host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host).to_string()
+        }
+    }
+}
+
+/// What a PC does with an image: its iPXE action, or for a disk image, its kernel and
+/// initrd from the image's boot partition (through this machine's copy-on-write overlay
+/// when it has one) with the command line filled in. `None`: nothing for PCs.
+pub(crate) fn pc_action(st: &State, img: &Image, mac: Mac, base: &str) -> Option<bootbob_ipxe::Action> {
+    if let Some(a) = &img.action {
+        return Some(a.clone());
+    }
+    let d = img.disk.as_ref()?;
+    let m = mac.0;
+    let dashed = format!("{:02x}-{:02x}-{:02x}-{:02x}-{:02x}-{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
+    let url = |f: &str| format!("{base}/boot/disk/{}/{}?mac={dashed}", img.id, f.trim_start_matches('/'));
+    let ip = st.device(mac).and_then(|d| d.ip).unwrap_or_default();
+    let cmdline =
+        d.cmdline.replace("{server}", &nbd_server(st, base)).replace("{disk}", &d.source).replace("{mac}", &dashed).replace("{ip}", &ip);
+    let initrds = if d.initrd.trim().is_empty() { vec![] } else { vec![url(d.initrd.trim())] };
+    Some(bootbob_ipxe::Action::Kernel { kernel: url(d.kernel.trim()), initrds, cmdline })
+}
+
+#[derive(Deserialize)]
+struct MacQuery {
+    mac: Option<String>,
+}
+
+/// A file from a PC disk image's boot partition: the kernel and initrd iPXE asks for.
+/// Read through the machine's overlay when the image is copy-on-write and it has one
+/// (a kernel it installed lives there).
+async fn disk_file(Ax(st): Ax<St>, Path((image, path)): Path<(String, String)>, Query(q): Query<MacQuery>) -> Response {
+    let Some(d) = st.image(&image).and_then(|i| i.disk) else {
+        return not_found("disk image").into_response();
+    };
+    let Ok(src) = bootbob_pi::resolve_source(&st.config.images_dir(), &d.source) else {
+        return not_found("disk image").into_response();
+    };
+    let Some(path) = bootbob_tftp::clean_path(&path) else { return bad("bad path").into_response() };
+    let cow = q
+        .mac
+        .as_deref()
+        .and_then(|m| m.parse::<Mac>().ok())
+        .filter(|_| d.cow)
+        .map(|mac| (crate::nbd::overlay_dir(&st, mac), crate::nbd::overlay_name(&d.source).to_string()));
+    let look = move || -> std::io::Result<Option<Vec<u8>>> {
+        let found = match cow {
+            Some((dir, name)) if bootbob_cow::Cow::exists(&dir, &name) => {
+                bootbob_pi::find_on(&bootbob_cow::Cow::open(&src, &dir, &name, true)?, &path)?
+            }
+            _ => bootbob_pi::find(&src, &path)?,
+        };
+        Ok(match found {
+            Some(bootbob_pi::Found::Bytes(b)) => Some(b),
+            Some(bootbob_pi::Found::Path { path, .. }) => Some(std::fs::read(path)?),
+            None => None,
+        })
+    };
+    match tokio::task::spawn_blocking(look).await {
+        Ok(Ok(Some(bytes))) => ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
+        Ok(Ok(None)) => not_found("file in the boot partition").into_response(),
+        Ok(Err(e)) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("can't read {image}: {e}")).into_response(),
+        Err(e) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn boot_chose(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>) -> Response {
     let base = base_url(&st, &headers);
     let Some(mac) = q.mac.as_deref().and_then(|m| m.parse::<Mac>().ok()) else {
@@ -258,7 +334,7 @@ async fn boot_chose(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity
     };
     let dev = record_identity(&st, mac, &q);
     let item = q.item.unwrap_or_default();
-    match st.image(&item).and_then(|i| i.action.map(|a| (i.title, a))) {
+    match st.image(&item).and_then(|i| pc_action(&st, &i, mac, &base).map(|a| (i.title, a))) {
         Some((title, action)) => {
             st.record_boot(mac, &item, "chosen at the menu", false);
             ipxe(bootbob_ipxe::boot(&action, &title, &base))
@@ -470,6 +546,54 @@ struct NewDisk {
 async fn create_disk(Ax(st): Ax<St>, Json(d): Json<NewDisk>) -> Result<StatusCode, ApiError> {
     crate::nbd::create_disk(&st, &d.name, d.size).map_err(bad)?;
     Ok(StatusCode::CREATED)
+}
+
+/// Uploads a disk image (the request body, streamed to disk). Never overwrites one.
+async fn upload_disk(Ax(st): Ax<St>, Path(name): Path<String>, body: axum::body::Body) -> Result<StatusCode, ApiError> {
+    crate::nbd::check_disk_name(&name).map_err(bad)?;
+    let dir = st.config.images_dir();
+    let path = dir.join(&name);
+    if path.exists() {
+        return Err(ApiError(StatusCode::CONFLICT, format!("{name} already exists; delete it first")));
+    }
+    let tmp = dir.join(format!(".{name}.upload"));
+    let res: Result<u64, String> = async {
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::File::create(&tmp).await.map_err(|e| format!("can't create {name}: {e}"))?;
+        let mut n = 0u64;
+        let mut s = body.into_data_stream();
+        while let Some(chunk) = s.next().await {
+            let chunk = chunk.map_err(|e| format!("upload interrupted: {e}"))?;
+            f.write_all(&chunk).await.map_err(|e| format!("can't write {name}: {e}"))?;
+            n += chunk.len() as u64;
+        }
+        f.sync_all().await.map_err(|e| format!("can't write {name}: {e}"))?;
+        Ok(n)
+    }
+    .await;
+    let n = match res {
+        Ok(0) => Err("the upload was empty".to_string()),
+        other => other,
+    }
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+    .map_err(bad)?;
+    if path.exists() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ApiError(StatusCode::CONFLICT, format!("{name} appeared during the upload")));
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("can't store {name}: {e}")))?;
+    st.event(None, "disk", format!("Uploaded disk {name} ({} MB)", n.div_ceil(1 << 20)));
+    Ok(StatusCode::CREATED)
+}
+
+/// Deletes a disk image no image uses, with any machines' overlays of it.
+async fn delete_disk(Ax(st): Ax<St>, Path(name): Path<String>) -> Result<StatusCode, ApiError> {
+    match crate::nbd::delete_disk(&st, &name) {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err((code, msg)) => Err(ApiError(StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), msg)),
+    }
 }
 
 async fn delete_image(Ax(st): Ax<St>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {

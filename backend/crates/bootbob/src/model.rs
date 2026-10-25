@@ -129,8 +129,38 @@ pub struct Image {
     /// What a Raspberry Pi boots: its boot files over TFTP.
     #[serde(default)]
     pub pi: Option<PiBoot>,
+    /// What a PC boots from a disk image: the kernel and initrd from its FAT boot
+    /// partition over HTTP, the root filesystem over NBD. Instead of `action`.
+    #[serde(default)]
+    pub disk: Option<DiskBoot>,
     #[serde(default, skip_deserializing)]
     pub builtin: bool,
+}
+
+/// A PC booting a whole system from a disk image, the way a Pi image does: the image
+/// holds a FAT boot partition (kernel, initrd) and the root filesystem.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskBoot {
+    /// A disk image (`.img`) in the images directory.
+    pub source: String,
+    /// The kernel, a path in the boot partition.
+    #[serde(default = "default_kernel")]
+    pub kernel: String,
+    /// The initrd, a path in the boot partition. Empty: none.
+    #[serde(default)]
+    pub initrd: String,
+    /// The kernel command line. `{server}` (BootBob's NBD address), `{disk}` (the image's
+    /// file name), `{mac}` and `{ip}` are filled in per machine, e.g.
+    /// `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp`.
+    #[serde(default)]
+    pub cmdline: String,
+    /// Each machine gets its own copy-on-write overlay; the image is never written.
+    #[serde(default)]
+    pub cow: bool,
+}
+
+fn default_kernel() -> String {
+    "vmlinuz".into()
 }
 
 /// A Raspberry Pi boot tree, served over TFTP to the Pis assigned it.
@@ -255,6 +285,7 @@ pub fn builtin_images() -> Vec<Image> {
         group: group.into(),
         action,
         pi: None,
+        disk: None,
         builtin: true,
     };
     vec![

@@ -193,8 +193,22 @@ impl State {
         if builtin_images().iter().any(|b| b.id == image.id) {
             return Err(format!("{:?} is a built-in image", image.id));
         }
-        if image.action.is_none() && image.pi.is_none() {
-            return Err("an image needs something to boot: an iPXE action, a Raspberry Pi boot tree, or both".into());
+        if image.action.is_none() && image.pi.is_none() && image.disk.is_none() {
+            return Err(
+                "an image needs something to boot: an iPXE action or a disk image for PCs, a Raspberry Pi boot tree, or both".into()
+            );
+        }
+        if image.action.is_some() && image.disk.is_some() {
+            return Err("a PC boots either the iPXE action or the disk image, not both".into());
+        }
+        if let Some(d) = &image.disk {
+            bootbob_pi::resolve_source(&self.config.images_dir(), &d.source)?;
+            if !d.source.ends_with(".img") {
+                return Err("a PC disk boot needs a disk image (.img)".into());
+            }
+            if d.kernel.trim().is_empty() {
+                return Err("a PC disk boot needs the kernel's path in the boot partition".into());
+            }
         }
         if let Some(pi) = &image.pi {
             bootbob_pi::resolve_source(&self.config.images_dir(), &pi.source)?;
@@ -235,7 +249,7 @@ impl State {
         s.theme.validate()?;
         match self.image(&s.default_image) {
             None => return Err(format!("no image {:?}", s.default_image)),
-            Some(i) if i.action.is_none() && i.id != "menu" => {
+            Some(i) if i.action.is_none() && i.disk.is_none() && i.id != "menu" => {
                 return Err(format!("{:?} is for Raspberry Pis only, so it can't be the PC default", s.default_image));
             }
             Some(_) => {}

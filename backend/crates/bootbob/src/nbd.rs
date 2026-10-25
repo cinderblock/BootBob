@@ -59,14 +59,24 @@ impl Nbd {
         };
         let mac = self.st.mac_for(ip).ok_or_else(|| format!("BootBob doesn't know which machine {ip} is"))?;
         let dev = self.st.device(mac).ok_or_else(|| format!("{mac} has never netbooted from BootBob"))?;
+        // What it would boot now as a Pi or a PC, and what it is running.
         let mut images: Vec<String> = self.st.resolve_pi(&dev).map(|r| r.image).into_iter().collect();
+        images.push(self.st.resolve(&dev).image);
         images.extend(dev.last_boot.as_ref().map(|b| b.image.clone()));
-        let disks = images
+        images.sort();
+        images.dedup();
+        let mut disks: Vec<Allowed> = images
             .iter()
-            .filter_map(|id| self.st.image(id)?.pi)
-            .filter(|p| p.source.ends_with(".img"))
-            .map(|p| Allowed { source: p.source, cow: p.cow })
+            .filter_map(|id| self.st.image(id))
+            .flat_map(|i| {
+                let pi = i.pi.map(|p| Allowed { source: p.source, cow: p.cow });
+                let pc = i.disk.map(|d| Allowed { source: d.source, cow: d.cow });
+                pi.into_iter().chain(pc)
+            })
+            .filter(|a| a.source.ends_with(".img"))
             .collect();
+        disks.sort_by(|a, b| a.source.cmp(&b.source));
+        disks.dedup_by(|a, b| a.source == b.source);
         Ok((mac, disks))
     }
 }
@@ -151,16 +161,53 @@ pub fn reset_overlay(st: &State, mac: Mac, source: &str) -> Result<bool, (u16, S
     Ok(true)
 }
 
-/// Creates an empty (sparse) disk image in the images directory, for a machine to
-/// partition and fill over NBD.
-pub fn create_disk(st: &State, name: &str, size: u64) -> Result<(), String> {
-    let ok_name = name.ends_with(".img")
+/// A disk image's file name: letters, digits, `-`, `_` and `.`, ending in `.img`.
+pub fn check_disk_name(name: &str) -> Result<(), String> {
+    let ok = name.ends_with(".img")
         && name.len() > 4
         && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
         && !name.starts_with('.');
-    if !ok_name {
-        return Err("a disk name is letters, digits, '-', '_' and '.', ending in .img".into());
+    if ok { Ok(()) } else { Err("a disk name is letters, digits, '-', '_' and '.', ending in .img".into()) }
+}
+
+/// Deletes a disk image and every machine's overlay of it. Refused while an image uses
+/// it or a machine is connected to it.
+pub fn delete_disk(st: &State, name: &str) -> Result<(), (u16, String)> {
+    check_disk_name(name).map_err(|e| (400, e))?;
+    let path = st.config.images_dir().join(name);
+    if !path.is_file() {
+        return Err((404, format!("no disk {name}")));
     }
+    let users: Vec<String> = st
+        .images()
+        .into_iter()
+        .filter(|i| i.pi.as_ref().is_some_and(|p| p.source == name) || i.disk.as_ref().is_some_and(|d| d.source == name))
+        .map(|i| i.id)
+        .collect();
+    if !users.is_empty() {
+        return Err((409, format!("{name} is used by image(s) {}", users.join(", "))));
+    }
+    if st.nbd_live.in_use(&path) {
+        return Err((409, format!("{name} is in use over NBD")));
+    }
+    let stem = overlay_name(name);
+    if let Ok(macs) = std::fs::read_dir(st.config.overlays_dir()) {
+        for m in macs.filter_map(Result::ok) {
+            if st.nbd_live.in_use(&bootbob_cow::overlay_paths(&m.path(), stem).1) {
+                return Err((409, format!("a machine is running from its overlay of {name}")));
+            }
+            let _ = Cow::remove(&m.path(), stem);
+        }
+    }
+    std::fs::remove_file(&path).map_err(|e| (500, format!("can't delete {name}: {e}")))?;
+    st.event(None, "disk", format!("Deleted disk {name} and its overlays"));
+    Ok(())
+}
+
+/// Creates an empty (sparse) disk image in the images directory, for a machine to
+/// partition and fill over NBD.
+pub fn create_disk(st: &State, name: &str, size: u64) -> Result<(), String> {
+    check_disk_name(name)?;
     if !(1 << 30..=4 << 40).contains(&size) || !size.is_multiple_of(512) {
         return Err("a disk is 1 GiB to 4 TiB, in whole 512-byte sectors".into());
     }

@@ -85,6 +85,17 @@ Every file of one boot comes from the image it started with, so a "next boot onl
 assignment lasts the whole boot. A Pi with nothing to boot gets nothing, keeps asking, and
 shows up in the web UI as waiting.
 
+## PCs running from a disk image
+
+A PC can run a whole system from a disk image too, the same way a Pi does: give an image a
+`disk` section instead of an iPXE action. The image holds a FAT boot partition with the
+kernel and initrd, and the root filesystem. iPXE fetches the kernel and initrd from
+BootBob over HTTP (`/boot/disk/<image>/<file>`), and the initrd mounts the root over NBD,
+with a command line like `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp`.
+Copy-on-write works the same as for Pis. Disk images can be uploaded with
+`PUT /api/disks/<name>.img` (the body is the image; never overwrites) and deleted with
+`DELETE` once no image uses them.
+
 ## Running it
 
 ```sh
@@ -142,9 +153,12 @@ for throwaway VMs.
 | `PATCH /api/devices/{mac}` | `{"name": …, "notes": …}` |
 | `PUT /api/devices/{mac}/assignment` | `{"image": "debian", "once": true}` |
 | `DELETE /api/devices/{mac}/assignment` | Back to the default |
-| `GET /api/images`, `PUT/DELETE /api/images/{id}` | The catalogue: an iPXE `action` (kernel, chain or script), a Raspberry Pi boot tree (`pi`), or both |
+| `GET /api/images`, `PUT/DELETE /api/images/{id}` | The catalogue: for PCs an iPXE `action` (kernel, chain or script) or a `disk` image; for Pis a boot tree (`pi`); or one of each |
 | `GET /api/devices/{mac}/overlays` | A machine's copy-on-write overlays: image, bytes written, in use |
 | `DELETE /api/devices/{mac}/overlays/{image}` | Reset one: back on the pristine image at the next boot (409 while in use) |
+| `PUT /api/disks/{name}.img` | Upload a disk image (the request body) |
+| `DELETE /api/disks/{name}.img` | Delete one no image uses, with its overlays |
+| `GET /boot/disk/{image}/{file}?mac=…` | A file from a PC disk image's boot partition (what iPXE fetches) |
 | `POST /api/disks` | `{"name": "desky.img", "size": <bytes>}`: an empty disk image to fill over NBD |
 | `GET /api/pi/sources` | Directories and disk images in the images directory, with the Pi boot files each has |
 | `GET/PUT /api/settings` | Default image (PCs and Pis), menu poll interval, theme |
