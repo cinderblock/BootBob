@@ -1,15 +1,23 @@
-import { useState } from "react";
-import { api, type Action, type Image } from "./api";
+import { useEffect, useState } from "react";
+import { api, type Action, type Image, type PiBoot, type PiSource } from "./api";
 import type { Live } from "./live";
 
-const kinds: { kind: Action["kind"]; label: string }[] = [
+type Kind = Action["kind"] | "pi";
+
+const kinds: { kind: Kind; label: string }[] = [
   { kind: "kernel", label: "Linux kernel + initrd" },
   { kind: "chain", label: "Chain a URL (iPXE script or EFI binary)" },
   { kind: "script", label: "iPXE script" },
+  { kind: "pi", label: "Raspberry Pi boot files" },
 ];
 
-function describeAction(a: Action | null): string {
-  if (!a) return "the fallback menu";
+function describeImage(i: Image): string {
+  const pi = i.pi ? `Pi boot files from ${i.pi.source}` : null;
+  if (!i.action) return pi ?? "the fallback menu";
+  return pi ? `${describeAction(i.action)}; ${pi}` : describeAction(i.action);
+}
+
+function describeAction(a: Action): string {
   switch (a.kind) {
     case "local_disk":
       return "back to the firmware (local disk)";
@@ -28,27 +36,55 @@ function describeAction(a: Action | null): string {
   }
 }
 
-const blank = (): Draft => ({ id: "", title: "", group: "", kind: "kernel", url: "", kernel: "", initrds: "", cmdline: "", script: "" });
+const blank = (): Draft => ({
+  id: "",
+  title: "",
+  group: "",
+  kind: "kernel",
+  url: "",
+  kernel: "",
+  initrds: "",
+  cmdline: "",
+  script: "",
+  source: "",
+  piCmdline: "",
+  piConfig: "",
+  keepAction: null,
+  keepPi: null,
+});
 
 interface Draft {
   id: string;
   title: string;
   group: string;
-  kind: Action["kind"];
+  kind: Kind;
   url: string;
   kernel: string;
   initrds: string;
   cmdline: string;
   script: string;
+  source: string;
+  piCmdline: string;
+  piConfig: string;
+  /** The half the editor isn't showing, kept as it was: an image can have both. */
+  keepAction: Action | null;
+  keepPi: PiBoot | null;
 }
 
 function toDraft(i: Image): Draft {
-  const d = { ...blank(), id: i.id, title: i.title, group: i.group };
+  const d = { ...blank(), id: i.id, title: i.title, group: i.group, keepAction: i.action, keepPi: i.pi };
+  if (i.pi && !i.action) return { ...d, kind: "pi", source: i.pi.source, piCmdline: i.pi.cmdline, piConfig: i.pi.config };
   const a = i.action;
   if (a?.kind === "chain") return { ...d, kind: "chain", url: a.url };
   if (a?.kind === "kernel") return { ...d, kind: "kernel", kernel: a.kernel, initrds: a.initrds.join("\n"), cmdline: a.cmdline };
   if (a?.kind === "script") return { ...d, kind: "script", script: a.script };
   return d;
+}
+
+/** The image's `action` and `pi` from the editor. */
+function toBoot(d: Draft): { action: Action | null; pi: PiBoot | null } {
+  if (d.kind === "pi") return { action: d.keepAction, pi: { source: d.source.trim(), cmdline: d.piCmdline.trim(), config: d.piConfig.trim() } };
+  return { action: toAction(d), pi: d.keepPi };
 }
 
 function toAction(d: Draft): Action {
@@ -73,7 +109,13 @@ function toAction(d: Draft): Action {
 export function Images({ live }: { live: Live }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [sources, setSources] = useState<PiSource[]>([]);
   const set = (patch: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...patch } : d));
+  const editingPi = draft?.kind === "pi";
+  useEffect(() => {
+    if (editingPi) api.piSources().then(setSources, () => setSources([]));
+  }, [editingPi]);
+  const chosen = sources.find((s) => s.path === draft?.source.trim());
 
   return (
     <section>
@@ -82,8 +124,8 @@ export function Images({ live }: { live: Live }) {
         <button onClick={() => setDraft(blank())}>Add an image</button>
       </div>
       <p className="muted">
-        Images with a menu section appear in the fallback menu. Built-in images come with BootBob and can't be changed. Installers,
-        network roots and backups come in later releases.
+        Images with a menu section appear in the fallback menu. Built-in images come with BootBob and can't be changed. Raspberry Pi
+        images serve a boot tree over TFTP to the Pis assigned them. Installers, network roots and backups come in later releases.
       </p>
       <table className="images">
         <thead>
@@ -101,7 +143,7 @@ export function Images({ live }: { live: Live }) {
                 <strong>{i.title}</strong> <span className="muted small">{i.id}</span>
               </td>
               <td>{i.group || <span className="muted">not listed</span>}</td>
-              <td className="muted">{describeAction(i.action)}</td>
+              <td className="muted">{describeImage(i)}</td>
               <td className="actions">
                 {i.builtin ? (
                   <span className="tag">built in</span>
@@ -130,7 +172,7 @@ export function Images({ live }: { live: Live }) {
           className="editor"
           onSubmit={(e) => {
             e.preventDefault();
-            api.putImage({ id: draft.id.trim(), title: draft.title.trim(), group: draft.group.trim(), action: toAction(draft) }).then(
+            api.putImage({ id: draft.id.trim(), title: draft.title.trim(), group: draft.group.trim(), ...toBoot(draft) }).then(
               () => {
                 setDraft(null);
                 setError(null);
@@ -152,7 +194,7 @@ export function Images({ live }: { live: Live }) {
           </label>
           <label>
             Kind{" "}
-            <select value={draft.kind} onChange={(e) => set({ kind: e.currentTarget.value as Action["kind"] })}>
+            <select value={draft.kind} onChange={(e) => set({ kind: e.currentTarget.value as Kind })}>
               {kinds.map((k) => (
                 <option key={k.kind} value={k.kind}>
                   {k.label}
@@ -176,6 +218,55 @@ export function Images({ live }: { live: Live }) {
               <label>
                 Kernel command line <input value={draft.cmdline} onInput={(e) => set({ cmdline: e.currentTarget.value })} />
               </label>
+            </>
+          )}
+          {draft.kind === "pi" && (
+            <>
+              <label>
+                Boot files{" "}
+                <input
+                  required
+                  list="pi-sources"
+                  value={draft.source}
+                  onInput={(e) => set({ source: e.currentTarget.value })}
+                  placeholder="a directory or .img in the images directory"
+                />
+                <datalist id="pi-sources">
+                  {sources.map((s) => (
+                    <option key={s.path} value={s.path}>
+                      {s.kind === "disk_image" ? "disk image" : "directory"}
+                      {s.boot_files.length ? `: ${s.boot_files.join(", ")}` : ""}
+                    </option>
+                  ))}
+                </datalist>
+              </label>
+              <p className="muted small">
+                {chosen
+                  ? chosen.error
+                    ? `Can't read it: ${chosen.error}`
+                    : chosen.boot_files.length
+                      ? `Has ${chosen.boot_files.join(", ")}.`
+                      : "No Pi boot files found in it."
+                  : sources.length
+                    ? `In the images directory: ${sources.map((s) => s.path).join(", ")}.`
+                    : "Nothing in the images directory yet. Put a boot tree (a directory) or a decompressed Pi OS .img there."}{" "}
+                A disk image's FAT boot partition is read in place.
+              </p>
+              <label>
+                Replace cmdline.txt (empty: the tree's own){" "}
+                <input
+                  className="mono"
+                  value={draft.piCmdline}
+                  onInput={(e) => set({ piCmdline: e.currentTarget.value })}
+                  placeholder="console=tty1 root=/dev/nbd0p2 …"
+                />
+              </label>
+              <label>
+                Add to config.txt <textarea rows={2} className="mono" value={draft.piConfig} onInput={(e) => set({ piConfig: e.currentTarget.value })} />
+              </label>
+              <p className="muted small">
+                Both can use {"{serial}"}, {"{mac}"}, {"{ip}"} and {"{server}"}, filled in for each Pi.
+              </p>
             </>
           )}
           {draft.kind === "script" && (

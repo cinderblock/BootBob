@@ -6,6 +6,7 @@ import { ago, fullTime } from "./time";
 const stateLabel: Record<Device["state"], string> = {
   at_menu: "waiting at menu",
   menu_idle: "at menu, idle",
+  pi_waiting: "Pi, nothing to boot",
   stuck: "didn't reach us",
   booted: "booted",
   seen: "seen",
@@ -106,7 +107,9 @@ function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) 
   }, [d.mac, live.events.length, live.events[live.events.length - 1]?.at]);
 
   const run = (p: Promise<unknown>) => p.then(() => setError(null), (e: Error) => setError(e.message));
-  const bootable = live.images.filter((i) => i.action !== null || i.id === "menu");
+  // A Pi boots only images with Pi boot files; a PC only those with an iPXE action.
+  const isPi = d.firmware === "rpi";
+  const bootable = live.images.filter((i) => (isPi ? i.pi !== null : i.action !== null || i.id === "menu"));
 
   return (
     <div className="device-detail">
@@ -175,7 +178,7 @@ function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) 
           )}
           {d.serial && (
             <>
-              <dt>Serial</dt>
+              <dt>{isPi ? "Pi serial" : "Serial"}</dt>
               <dd>{d.serial}</dd>
             </>
           )}

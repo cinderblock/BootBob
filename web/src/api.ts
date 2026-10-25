@@ -43,9 +43,10 @@ export interface Device {
   } | null;
   tftp: { at: Millis; path: string; served: string | null; ok: boolean | null } | null;
   last_script: Millis | null;
+  pi_session: { image: string; started: Millis; last: Millis } | null;
   // Computed by the server:
   code: string;
-  state: "at_menu" | "menu_idle" | "stuck" | "booted" | "seen";
+  state: "at_menu" | "menu_idle" | "pi_waiting" | "stuck" | "booted" | "seen";
   summary: string;
   next: { image: string; title: string; reason: string };
 }
@@ -55,7 +56,23 @@ export interface Image {
   title: string;
   group: string;
   action: Action | null;
+  pi: PiBoot | null;
   builtin: boolean;
+}
+
+/** A Raspberry Pi boot tree: a directory or disk image in the images directory. */
+export interface PiBoot {
+  source: string;
+  cmdline: string;
+  config: string;
+}
+
+export interface PiSource {
+  path: string;
+  kind: "directory" | "disk_image";
+  size: number | null;
+  boot_files: string[];
+  error: string | null;
 }
 
 export interface Theme {
@@ -68,6 +85,7 @@ export interface Theme {
 
 export interface Settings {
   default_image: string;
+  pi_default_image: string;
   poll_secs: number;
   menu_timeout_secs: number;
   theme: Theme;
@@ -127,6 +145,7 @@ export const api = {
   images: () => call<Image[]>("GET", "/api/images"),
   putImage: (img: Omit<Image, "builtin">) => call<Image>("PUT", `/api/images/${encodeURIComponent(img.id)}`, img),
   deleteImage: (id: string) => call<void>("DELETE", `/api/images/${encodeURIComponent(id)}`),
+  piSources: () => call<PiSource[]>("GET", "/api/pi/sources"),
   settings: () => call<Settings>("GET", "/api/settings"),
   putSettings: (s: Settings) => call<Settings>("PUT", "/api/settings", s),
   events: (mac?: string) => call<BootEvent[]>("GET", `/api/events${mac ? `?mac=${mac}` : ""}`),

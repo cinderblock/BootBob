@@ -66,6 +66,10 @@ pub struct State {
 impl State {
     pub fn open(config: Config) -> anyhow::Result<State> {
         std::fs::create_dir_all(&config.data_dir)?;
+        // So it's obvious where Pi boot trees and disk images go. May be a read-only mount.
+        if let Err(e) = std::fs::create_dir_all(config.images_dir()) {
+            tracing::warn!("can't create the images directory {}: {e}", config.images_dir().display());
+        }
         let store = Store::open(&config.data_dir.join("bootbob.redb"))?;
         let devices = store.all::<Device>(Table::Devices)?.into_iter().filter_map(|d| Some((d.mac.parse::<Mac>().ok()?, d))).collect();
         let mut images: BTreeMap<String, Image> = store.all::<Image>(Table::Images)?.into_iter().map(|i| (i.id.clone(), i)).collect();
@@ -186,8 +190,11 @@ impl State {
         if builtin_images().iter().any(|b| b.id == image.id) {
             return Err(format!("{:?} is a built-in image", image.id));
         }
-        if image.action.is_none() {
-            return Err("an image needs an action".into());
+        if image.action.is_none() && image.pi.is_none() {
+            return Err("an image needs something to boot: an iPXE action, a Raspberry Pi boot tree, or both".into());
+        }
+        if let Some(pi) = &image.pi {
+            bootbob_pi::resolve_source(&self.config.images_dir(), &pi.source)?;
         }
         self.store.put(Table::Images, &image.id, &image).map_err(|e| e.to_string())?;
         self.images.write().unwrap().insert(image.id.clone(), Image { builtin: false, ..image });
@@ -202,7 +209,8 @@ impl State {
             Some(_) => {}
         }
         let in_use = self.devices().iter().filter(|d| d.assignment.as_ref().is_some_and(|a| a.image == id)).count();
-        if in_use > 0 || self.settings().default_image == id {
+        let s = self.settings();
+        if in_use > 0 || s.default_image == id || s.pi_default_image == id {
             return Err(format!("{id:?} is in use ({in_use} assignments, or the default)"));
         }
         self.store.delete(Table::Images, id).map_err(|e| e.to_string())?;
@@ -219,8 +227,15 @@ impl State {
 
     pub fn put_settings(&self, s: Settings) -> Result<(), String> {
         s.theme.validate()?;
-        if self.image(&s.default_image).is_none() {
-            return Err(format!("no image {:?}", s.default_image));
+        match self.image(&s.default_image) {
+            None => return Err(format!("no image {:?}", s.default_image)),
+            Some(i) if i.action.is_none() && i.id != "menu" => {
+                return Err(format!("{:?} is for Raspberry Pis only, so it can't be the PC default", s.default_image));
+            }
+            Some(_) => {}
+        }
+        if !s.pi_default_image.is_empty() && self.image(&s.pi_default_image).and_then(|i| i.pi).is_none() {
+            return Err(format!("{:?} isn't an image with Raspberry Pi boot files", s.pi_default_image));
         }
         if !(3..=300).contains(&s.poll_secs) {
             return Err("poll_secs must be 3–300".into());
@@ -273,6 +288,24 @@ impl State {
         let s = self.settings();
         let image = if self.image(&s.default_image).is_some() { s.default_image } else { "menu".into() };
         Resolved { image, reason: "no assignment; site default".into(), once: false }
+    }
+
+    /// What a Raspberry Pi boots: its assignment if that has Pi boot files, else the Pi
+    /// default. `None`: nothing to serve it.
+    pub fn resolve_pi(&self, dev: &Device) -> Option<Resolved> {
+        let has_pi = |id: &str| self.image(id).is_some_and(|i| i.pi.is_some());
+        if let Some(a) = &dev.assignment
+            && has_pi(&a.image)
+        {
+            let reason = if a.once { "one-shot assignment" } else { "assigned to this machine" };
+            return Some(Resolved { image: a.image.clone(), reason: reason.into(), once: a.once });
+        }
+        let s = self.settings();
+        has_pi(&s.pi_default_image).then(|| Resolved {
+            image: s.pi_default_image,
+            reason: "no assignment; Raspberry Pi default".into(),
+            once: false,
+        })
     }
 
     /// Records that a machine is booting `image` (and uses up a one-shot assignment).

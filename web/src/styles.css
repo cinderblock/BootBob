@@ -219,6 +219,11 @@ tr.detail > td {
   color: var(--warn);
 }
 
+.state.pi_waiting {
+  background: color-mix(in srgb, var(--warn) 20%, transparent);
+  color: var(--warn);
+}
+
 .state.stuck {
   background: color-mix(in srgb, var(--bad) 20%, transparent);
   color: var(--bad);

@@ -54,6 +54,19 @@ export function SettingsView({ live }: { live: Live }) {
               ))}
           </select>
         </label>
+        <label title="A Pi with nothing to boot keeps asking (with network-only BOOT_ORDER), and shows up in Machines.">
+          Raspberry Pis with no assignment get{" "}
+          <select value={s.pi_default_image} onChange={(e) => setS({ ...s, pi_default_image: e.currentTarget.value })}>
+            <option value="">Nothing</option>
+            {live.images
+              .filter((i) => i.pi !== null)
+              .map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.title}
+                </option>
+              ))}
+          </select>
+        </label>
         <label>
           The fallback menu checks for an assignment every{" "}
           <input

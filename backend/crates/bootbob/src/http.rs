@@ -18,6 +18,7 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::model::*;
 use crate::state::{State, describe};
+use crate::tftp::PI_FIRMWARE;
 
 type St = Arc<State>;
 
@@ -31,6 +32,7 @@ pub fn router(st: St) -> Router {
         .route("/api/devices/{mac}/assignment", put(put_assignment).delete(delete_assignment))
         .route("/api/images", get(list_images))
         .route("/api/images/{id}", put(put_image).delete(delete_image))
+        .route("/api/pi/sources", get(pi_sources))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/events", get(list_events))
         .route("/api/doctor", get(last_report).post(run_doctor))
@@ -231,7 +233,15 @@ async fn boot_ipxe(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>
     }
 
     let Some(action) = st.image(&res.image).and_then(|i| i.action) else {
-        return ipxe(menu_script(&st, &dev, base, format!("Image {} has nothing to boot", res.image), true));
+        let why = match st.image(&res.image) {
+            Some(i) if i.pi.is_some() => format!(
+                "{} is for Raspberry Pis only.
+Choose something here, or reassign it in the web UI.",
+                i.title
+            ),
+            _ => format!("Image {} has nothing to boot", res.image),
+        };
+        return ipxe(menu_script(&st, &dev, base, why, true));
     };
     st.record_boot(mac, &res.image, &res.reason, res.once);
     let title = st.image(&res.image).map(|i| i.title).unwrap_or_default();
@@ -291,7 +301,7 @@ pub struct DeviceView {
     #[serde(flatten)]
     device: Device,
     pub(crate) code: String,
-    /// `at_menu`, `menu_idle`, `stuck`, `booted` or `seen`.
+    /// `at_menu`, `menu_idle`, `pi_waiting`, `stuck`, `booted` or `seen`.
     pub(crate) state: &'static str,
     summary: String,
     /// What it would get if it netbooted now.
@@ -309,7 +319,10 @@ pub fn view(st: &State, d: Device) -> DeviceView {
     let now = now_ms();
     let poll_ms = st.settings().poll_secs as u64 * 1000;
     let contact = d.last_script.unwrap_or(0).max(d.tftp.as_ref().map(|t| t.at).unwrap_or(0));
-    let (state, summary) = if let Some(m) = &d.menu {
+    let is_pi = d.firmware.as_deref() == Some(PI_FIRMWARE);
+    let (state, summary) = if is_pi && d.pi_session.is_none() && d.tftp.as_ref().is_some_and(|t| now.saturating_sub(t.at) < 300_000) {
+        ("pi_waiting", "A Raspberry Pi asking to netboot, with no Pi image to give it".to_string())
+    } else if let Some(m) = &d.menu {
         if now.saturating_sub(m.last_poll) <= poll_ms * 5 / 2 + 2000 {
             ("at_menu", "Waiting at the fallback menu".to_string())
         } else {
@@ -330,8 +343,20 @@ pub fn view(st: &State, d: Device) -> DeviceView {
     } else {
         ("seen", "Seen on the network".to_string())
     };
-    let r = st.resolve(&d);
-    let title = st.image(&r.image).map(|i| i.title).unwrap_or_else(|| r.image.clone());
+    let r = if is_pi {
+        st.resolve_pi(&d).unwrap_or_else(|| crate::state::Resolved {
+            image: String::new(),
+            reason: "no Pi image assigned, and no Raspberry Pi default".into(),
+            once: false,
+        })
+    } else {
+        st.resolve(&d)
+    };
+    let title = match st.image(&r.image) {
+        Some(i) => i.title,
+        None if r.image.is_empty() => "Nothing".into(),
+        None => r.image.clone(),
+    };
     DeviceView {
         code: d.mac.parse::<Mac>().map(|m| m.short()).unwrap_or_default(),
         state,
@@ -411,6 +436,11 @@ async fn put_image(Ax(st): Ax<St>, Path(id): Path<String>, Json(mut img): Json<I
     img.id = id;
     st.put_image(img.clone()).map_err(bad)?;
     Ok(Json(img))
+}
+
+async fn pi_sources(Ax(st): Ax<St>) -> Json<Vec<bootbob_pi::SourceInfo>> {
+    let dir = st.config.images_dir();
+    Json(tokio::task::spawn_blocking(move || bootbob_pi::scan(&dir)).await.unwrap_or_default())
 }
 
 async fn delete_image(Ax(st): Ax<St>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {

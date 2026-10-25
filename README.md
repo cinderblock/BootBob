@@ -5,10 +5,10 @@ fallback menu, show up in the web UI straight away, and can be pointed at someth
 from the browser while they wait. BootBob is BenchBob's sibling
 ([DeskyPi](https://github.com/cinderblock/DeskyPi)): same stack, same look.
 
-**Status: early (Phase 1 of the plan).** PCs (legacy BIOS and UEFI) netboot into BootBob's
-iPXE and its fallback menu, and can be assigned images from the web UI. Raspberry Pi
-native boot, network roots, installers, backup/restore and the controller image come in
-later phases. The design and plan live in DeskyPi's
+**Status: early (Phase 2 of the plan).** PCs (legacy BIOS and UEFI) netboot into BootBob's
+iPXE and its fallback menu, and can be assigned images from the web UI. Raspberry Pis
+netboot natively from boot trees and disk images. Network roots, installers,
+backup/restore and the controller image come in later phases. The design and plan live in DeskyPi's
 [`plans/pxe-netboot.md`](https://github.com/cinderblock/DeskyPi/blob/master/plans/pxe-netboot.md).
 
 ## How it fits on a network
@@ -44,6 +44,25 @@ image ("next boot only", or permanently) and it boots it at its next check-in, w
 at the keyboard. Choices made at the menu are reported back, so the UI always knows what
 each machine did.
 
+## Raspberry Pis
+
+A Pi 4 or 5 netboots with its own bootloader, no iPXE: set `BOOT_ORDER` to include network
+boot (`0xf2`: network only, retrying forever) and `TFTP_IP` to BootBob's address in its
+EEPROM. `TFTP_IP` is what lets it find BootBob without any Pi-specific DHCP options.
+
+The Pi then asks for its boot files over TFTP, under its serial number or MAC. BootBob
+serves them from the **Pi image** assigned to it (or the Pi default in Settings):
+
+- **Boot files** are a directory, or a disk image (`.img`), in the images directory
+  (`<data_dir>/images`). A disk image's FAT boot partition is read in place (MBR, GPT, or
+  a bare FAT filesystem), so a decompressed Pi OS image works as downloaded.
+- **`cmdline.txt`** can be replaced and **`config.txt`** added to, per image, with
+  `{serial}`, `{mac}`, `{ip}` and `{server}` filled in for each Pi.
+
+Every file of one boot comes from the image it started with, so a "next boot only"
+assignment lasts the whole boot. A Pi with nothing to boot gets nothing, keeps asking, and
+shows up in the web UI as waiting.
+
 ## Running it
 
 ```sh
@@ -70,7 +89,7 @@ Without a config, BootBob serves HTTP on `:8067` and TFTP on `:69` from `./data`
 
 | Path | What |
 | --- | --- |
-| `backend/` | Rust workspace: `bootbob` (the server), `bootbob-tftp`, `bootbob-dhcp`, `bootbob-ipxe` |
+| `backend/` | Rust workspace: `bootbob` (the server), `bootbob-tftp`, `bootbob-dhcp`, `bootbob-ipxe`, `bootbob-pi` |
 | `web/` | The web UI: Preact (via preact/compat), Vite, TypeScript, Bun |
 | `ipxe/` | iPXE build: pinned commit, embedded script, build options |
 | `e2e/` | End-to-end test: SeaBIOS and OVMF VMs netboot from BootBob in QEMU |
@@ -99,8 +118,9 @@ for throwaway VMs.
 | `PATCH /api/devices/{mac}` | `{"name": …, "notes": …}` |
 | `PUT /api/devices/{mac}/assignment` | `{"image": "debian", "once": true}` |
 | `DELETE /api/devices/{mac}/assignment` | Back to the default |
-| `GET /api/images`, `PUT/DELETE /api/images/{id}` | The catalogue (kernel, chain or script images) |
-| `GET/PUT /api/settings` | Default image, menu poll interval, theme |
+| `GET /api/images`, `PUT/DELETE /api/images/{id}` | The catalogue: an iPXE `action` (kernel, chain or script), a Raspberry Pi boot tree (`pi`), or both |
+| `GET /api/pi/sources` | Directories and disk images in the images directory, with the Pi boot files each has |
+| `GET/PUT /api/settings` | Default image (PCs and Pis), menu poll interval, theme |
 | `GET /api/events` | The log |
 | `GET /api/stream` | Server-sent events: what changed |
 | `GET /boot/ipxe?mac=…` | What iPXE asks; returns a script |

@@ -4,6 +4,7 @@
 #   bootbob-tftp   async read-only TFTP server (blksize, tsize, timeout, windowsize)
 #   bootbob-dhcp   DHCP parsing, the passive listener, firmware arch detection
 #   bootbob-ipxe   iPXE script generation (fallback menu, boot scripts)
+#   bootbob-pi     Raspberry Pi boot: bootloader request paths, boot files from dirs or disk images
 #   bootbob        the server binary: config, device store, resolver, HTTP API, web UI
 
 [workspace]
@@ -21,10 +22,13 @@ publish = false
 bootbob-tftp = { path = "crates/tftp" }
 bootbob-dhcp = { path = "crates/dhcp" }
 bootbob-ipxe = { path = "crates/ipxe" }
+bootbob-pi = { path = "crates/pi" }
 
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "json"] }
 bytes = "1"
+# Reads the boot partition straight out of a Pi disk image. No chrono: we never write.
+fatfs = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 libc = "0.2"
 redb = "4"

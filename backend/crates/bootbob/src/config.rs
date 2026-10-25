@@ -33,6 +33,9 @@ pub struct Config {
     pub ipxe_dir: PathBuf,
     /// The built web UI. Unset or missing: the API still works, the page doesn't.
     pub web_dir: Option<PathBuf>,
+    /// Image files: Raspberry Pi boot trees (directories) and disk images. Unset:
+    /// `<data_dir>/images`.
+    pub images_dir: Option<PathBuf>,
     /// The firmware assumed when a machine's can't be worked out.
     pub default_firmware: String,
 }
@@ -48,12 +51,17 @@ impl Default for Config {
             boot_filename: "bootbob".into(),
             ipxe_dir: PathBuf::from("ipxe"),
             web_dir: None,
+            images_dir: None,
             default_firmware: "efi-x64".into(),
         }
     }
 }
 
 impl Config {
+    pub fn images_dir(&self) -> PathBuf {
+        self.images_dir.clone().unwrap_or_else(|| self.data_dir.join("images"))
+    }
+
     pub fn load(path: Option<&Path>) -> anyhow::Result<Config> {
         let Some(path) = path else { return Ok(Config::default()) };
         let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("can't read {}: {e}", path.display()))?;

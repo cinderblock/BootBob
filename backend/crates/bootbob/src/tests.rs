@@ -320,6 +320,7 @@ async fn everything_survives_a_restart() {
             title: "R".into(),
             group: String::new(),
             action: Some(bootbob_ipxe::Action::Reboot),
+            pi: None,
             builtin: false,
         })
         .unwrap();
@@ -395,4 +396,155 @@ async fn an_untouched_menu_gives_up_and_boots_the_local_disk() {
     assert!(get(&t.st, &ident("&poll=1")).await.contains("choose --timeout"));
     s.menu_timeout_secs = 5;
     assert!(t.st.put_settings(s).is_err(), "shorter than two polls");
+}
+
+// ---- Raspberry Pi boot ----
+
+const PI: &str = "dc:a6:32:01:02:03";
+const PI_IP: [u8; 4] = [10, 255, 7, 40];
+
+/// A Pi boot tree in the images directory, as a directory (disk images are covered by
+/// the bootbob-pi crate's tests).
+fn pi_tree(t: &T) {
+    let tree = t.st.config.images_dir().join("pios");
+    std::fs::create_dir_all(tree.join("overlays")).unwrap();
+    std::fs::write(tree.join("start4.elf"), b"FIRMWARE").unwrap();
+    std::fs::write(tree.join("config.txt"), b"arm_64bit=1").unwrap();
+    std::fs::write(tree.join("cmdline.txt"), b"console=tty1 root=/dev/mmcblk0p2\n").unwrap();
+    std::fs::write(tree.join("overlays/vc4-kms-v3d.dtbo"), b"DTBO").unwrap();
+}
+
+async fn put_pi_image(t: &T, id: &str, pi: Value) -> (StatusCode, String) {
+    call(&t.st, Method::PUT, &format!("/api/images/{id}"), Some(json!({"title": "Pi OS", "pi": pi}))).await
+}
+
+async fn pi_file(tftp: &crate::tftp::Tftp, ip: [u8; 4], path: &str) -> Option<Vec<u8>> {
+    served(tftp.resolve(&tftp_req(ip, path)).await).await
+}
+
+#[tokio::test]
+async fn an_unassigned_pi_gets_nothing_and_shows_up_waiting() {
+    let t = setup();
+    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    let pi: Mac = PI.parse().unwrap();
+    t.st.learn_address(Ipv4Addr::from(PI_IP), pi);
+
+    assert!(pi_file(&tftp, PI_IP, "6a6f4d1d/start4.elf").await.is_none());
+    assert!(pi_file(&tftp, PI_IP, "start4.elf").await.is_none());
+
+    let d = json(&t.st, &format!("/api/devices/{PI}")).await;
+    assert_eq!(d["firmware"], "rpi");
+    assert_eq!(d["serial"], "6a6f4d1d");
+    assert_eq!(d["state"], "pi_waiting", "{d}");
+    assert_eq!(d["next"]["title"], "Nothing");
+    let msgs: Vec<String> = t.st.events(Some(PI), 10).into_iter().map(|e| e.message).collect();
+    assert_eq!(msgs.iter().filter(|m| m.contains("no Pi image assigned")).count(), 1, "{msgs:?}");
+}
+
+#[tokio::test]
+async fn an_assigned_pi_boots_its_tree_with_overrides() {
+    let t = setup();
+    pi_tree(&t);
+    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    let pi: Mac = PI.parse().unwrap();
+    t.st.learn_address(Ipv4Addr::from(PI_IP), pi);
+
+    let (s, body) = put_pi_image(
+        &t,
+        "pios",
+        json!({
+            "source": "pios",
+            "cmdline": "console=tty1 root=/dev/nbd0p2 nbdroot={server}:10809/{serial} mac={mac} ip={ip}",
+            "config": "dtoverlay=disable-wifi"
+        }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let (s, body) = call(&t.st, Method::PUT, &format!("/api/devices/{PI}/assignment"), Some(json!({"image": "pios", "once": true}))).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    assert_eq!(pi_file(&tftp, PI_IP, "6a6f4d1d/start4.elf").await.unwrap(), b"FIRMWARE");
+    // The one-shot assignment is used up as the boot starts, but the boot keeps going.
+    let d = t.st.device(pi).unwrap();
+    assert!(d.assignment.is_none());
+    assert_eq!(d.last_boot.as_ref().unwrap().image, "pios");
+    assert_eq!(d.pi_session.as_ref().unwrap().image, "pios");
+
+    assert_eq!(
+        String::from_utf8(pi_file(&tftp, PI_IP, "6a6f4d1d/cmdline.txt").await.unwrap()).unwrap(),
+        "console=tty1 root=/dev/nbd0p2 nbdroot=10.255.0.5:10809/6a6f4d1d mac=dc-a6-32-01-02-03 ip=10.255.7.40\n"
+    );
+    assert_eq!(
+        String::from_utf8(pi_file(&tftp, PI_IP, "6a6f4d1d/CONFIG.TXT").await.unwrap()).unwrap(),
+        "arm_64bit=1\n\n# Added by BootBob (image pios)\n[all]\ndtoverlay=disable-wifi\n"
+    );
+    assert_eq!(pi_file(&tftp, PI_IP, "6a6f4d1d/overlays/vc4-kms-v3d.dtbo").await.unwrap(), b"DTBO");
+    assert!(pi_file(&tftp, PI_IP, "6a6f4d1d/start.elf").await.is_none(), "optional files it doesn't have");
+    // Without the prefix (the bootloader drops it when nothing is found under it).
+    assert_eq!(pi_file(&tftp, PI_IP, "start4.elf").await.unwrap(), b"FIRMWARE");
+    let boots = t.st.events(Some(PI), 50).into_iter().filter(|e| e.kind == "boot").count();
+    assert_eq!(boots, 1, "one boot, however many files");
+    assert_eq!(json(&t.st, &format!("/api/devices/{PI}")).await["state"], "booted");
+
+    // The next boot, after a pause: the one-shot is gone, so nothing.
+    t.st.edit_device(pi, |d| d.pi_session.as_mut().unwrap().last -= PI_SESSION_GAP_MS + 1);
+    assert!(pi_file(&tftp, PI_IP, "6a6f4d1d/start4.elf").await.is_none());
+    assert!(t.st.device(pi).unwrap().pi_session.is_none());
+}
+
+#[tokio::test]
+async fn a_mac_prefix_identifies_the_pi_and_the_pi_default_applies() {
+    let t = setup();
+    pi_tree(&t);
+    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    put_pi_image(&t, "pios", json!({"source": "pios"})).await;
+    let mut s = t.st.settings();
+    s.pi_default_image = "pios".into();
+    t.st.put_settings(s).unwrap();
+
+    // No IP → MAC knowledge at all: the prefix says who it is.
+    let ip = [10, 255, 7, 41];
+    assert_eq!(pi_file(&tftp, ip, "dc-a6-32-0a-0b-0c/start4.elf").await.unwrap(), b"FIRMWARE");
+    let d = t.st.device("dc:a6:32:0a:0b:0c".parse().unwrap()).unwrap();
+    assert_eq!(d.last_boot.unwrap().reason, "no assignment; Raspberry Pi default");
+    assert_eq!(d.serial, None);
+    // The tree's own cmdline.txt when the image doesn't replace it.
+    assert_eq!(pi_file(&tftp, ip, "dc-a6-32-0a-0b-0c/cmdline.txt").await.unwrap(), b"console=tty1 root=/dev/mmcblk0p2\n");
+}
+
+#[tokio::test]
+async fn pi_images_are_checked_and_kept_apart_from_pcs() {
+    let t = setup();
+    pi_tree(&t);
+    let (s, body) = put_pi_image(&t, "bad", json!({"source": "../etc"})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(body.contains("inside the images directory"), "{body}");
+    let (s, body) = put_pi_image(&t, "missing", json!({"source": "nope.img"})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(body.contains("isn't in the images directory"), "{body}");
+    let (s, _) = call(&t.st, Method::PUT, "/api/images/empty", Some(json!({"title": "Nothing"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, body) = put_pi_image(&t, "pios", json!({"source": "pios"})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    // A Pi-only image can't be the PC default, and only Pi images can be the Pi default.
+    let mut s = t.st.settings();
+    s.default_image = "pios".into();
+    assert!(t.st.put_settings(s).unwrap_err().contains("Raspberry Pis only"));
+    let mut s = t.st.settings();
+    s.pi_default_image = "local".into();
+    assert!(t.st.put_settings(s).unwrap_err().contains("Raspberry Pi boot files"));
+
+    // A PC assigned it gets the menu, saying why, and the image isn't in the PC menu.
+    get(&t.st, &ident("")).await;
+    call(&t.st, Method::PUT, &format!("/api/devices/{MAC}/assignment"), Some(json!({"image": "pios"}))).await;
+    let script = get(&t.st, &ident("&poll=1")).await;
+    assert!(script.contains("Pi OS is for Raspberry Pis only"), "{script}");
+    assert!(!script.contains("img_pios"));
+
+    // The sources list shows the tree and what's in it.
+    let v = json(&t.st, "/api/pi/sources").await;
+    assert_eq!(v[0]["path"], "pios");
+    assert_eq!(v[0]["kind"], "directory");
+    assert_eq!(v[0]["boot_files"], json!(["start4.elf", "config.txt", "cmdline.txt"]));
 }

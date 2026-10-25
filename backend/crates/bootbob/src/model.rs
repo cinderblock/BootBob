@@ -38,7 +38,22 @@ pub struct Device {
     pub tftp: Option<TftpSeen>,
     /// The last time it fetched an iPXE script from us.
     pub last_script: Option<Millis>,
+    /// A Raspberry Pi's boot in progress: the image it started with, so every file of one
+    /// boot comes from the same image even if the assignment changes (or was one-shot).
+    pub pi_session: Option<PiSession>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PiSession {
+    pub image: String,
+    pub started: Millis,
+    /// The last TFTP request in it. A gap longer than [`PI_SESSION_GAP_MS`] ends it.
+    pub last: Millis,
+}
+
+/// A Pi fetches its boot files back to back; this long with no request means the boot
+/// is over (or never started), and the next request begins a new one.
+pub const PI_SESSION_GAP_MS: Millis = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assignment {
@@ -108,10 +123,29 @@ pub struct Image {
     /// The fallback menu's section for it. Empty: not listed in the menu.
     #[serde(default)]
     pub group: String,
-    /// `None` only for the fallback menu itself.
+    /// What a PC (iPXE) does with it. `None` for the fallback menu itself, and for images
+    /// only Raspberry Pis can boot.
     pub action: Option<Action>,
+    /// What a Raspberry Pi boots: its boot files over TFTP.
+    #[serde(default)]
+    pub pi: Option<PiBoot>,
     #[serde(default, skip_deserializing)]
     pub builtin: bool,
+}
+
+/// A Raspberry Pi boot tree, served over TFTP to the Pis assigned it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PiBoot {
+    /// A directory or a disk image (`.img`) in the images directory, relative to it. A
+    /// disk image's FAT boot partition is read in place.
+    pub source: String,
+    /// Replaces the tree's `cmdline.txt`. `{serial}`, `{mac}`, `{ip}` and `{server}` are
+    /// filled in per Pi. Empty: the tree's own.
+    #[serde(default)]
+    pub cmdline: String,
+    /// Lines added to the end of the tree's `config.txt`, same placeholders.
+    #[serde(default)]
+    pub config: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +161,9 @@ pub struct Event {
 pub struct Settings {
     /// What machines with no assignment get.
     pub default_image: String,
+    /// What Raspberry Pis with no assignment get. Empty: nothing, and they keep asking
+    /// (with `BOOT_ORDER` network-only they retry until one is assigned).
+    pub pi_default_image: String,
     /// How often the fallback menu checks for an assignment.
     pub poll_secs: u32,
     /// After this long at the menu untouched, boot the local disk, so a PC that merely
@@ -137,7 +174,13 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { default_image: "menu".into(), poll_secs: 10, menu_timeout_secs: 120, theme: Theme::default() }
+        Settings {
+            default_image: "menu".into(),
+            pi_default_image: String::new(),
+            poll_secs: 10,
+            menu_timeout_secs: 120,
+            theme: Theme::default(),
+        }
     }
 }
 
@@ -207,6 +250,7 @@ pub fn builtin_images() -> Vec<Image> {
         title: title.into(),
         group: group.into(),
         action,
+        pi: None,
         builtin: true,
     };
     vec![

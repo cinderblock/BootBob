@@ -1,0 +1,16 @@
+[package]
+name = "bootbob-pi"
+description = "Raspberry Pi network boot: bootloader request paths, and boot files from directories or disk images"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+bootbob-dhcp.workspace = true
+fatfs.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
