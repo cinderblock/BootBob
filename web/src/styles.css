@@ -302,6 +302,19 @@ dd {
   word-break: break-word;
 }
 
+ul.overlays {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+
+ul.overlays li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 0;
+}
+
 ul.events {
   list-style: none;
   padding: 0;

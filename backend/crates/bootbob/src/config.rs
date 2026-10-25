@@ -66,6 +66,11 @@ impl Config {
         self.images_dir.clone().unwrap_or_else(|| self.data_dir.join("images"))
     }
 
+    /// Machines' copy-on-write overlays, one directory per MAC.
+    pub fn overlays_dir(&self) -> PathBuf {
+        self.data_dir.join("overlays")
+    }
+
     pub fn load(path: Option<&Path>) -> anyhow::Result<Config> {
         let Some(path) = path else { return Ok(Config::default()) };
         let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("can't read {}: {e}", path.display()))?;

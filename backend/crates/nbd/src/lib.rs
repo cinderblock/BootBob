@@ -1,4 +1,4 @@
-//! An NBD server: disk image files served as network block devices.
+//! An NBD server: disks served as network block devices.
 //!
 //! This is how a diskless machine gets its root filesystem. Its initramfs runs
 //! `nbd-client`, which connects here and asks for an export by name; the kernel then sees
@@ -10,19 +10,21 @@
 //! are handled in order; writes are durable once acknowledged with `FUA`, or after a
 //! `FLUSH`.
 //!
-//! Which client may use which export is the [`Exports`] implementation's call. One
-//! export has one connection at a time: a new connection to an export ends the old one,
-//! because the usual reason for a second connection is that the machine rebooted
-//! without saying goodbye, and its old TCP connection is dead but not yet noticed.
+//! What an export is (a plain image file, or a machine's copy-on-write overlay over a
+//! shared base: [`bootbob_cow`]) and which client may use it is the [`Exports`]
+//! implementation's call. One export has one connection at a time: a new connection to
+//! an export ends the old one, because the usual reason for a second connection is that
+//! the machine rebooted without saying goodbye, and its old TCP connection is dead but
+//! not yet noticed.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bootbob_cow::{Cow, Disk, Plain};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -78,8 +80,23 @@ const MAX_OPTION: u32 = 64 << 10;
 #[derive(Debug, Clone)]
 pub struct Export {
     pub name: String,
+    /// The disk image: the whole disk, or the base of a copy-on-write overlay.
     pub path: PathBuf,
     pub read_only: bool,
+    /// A copy-on-write overlay (directory and name, see [`bootbob_cow::Cow::open`]) over
+    /// `path`, which is then never written. `None`: the image itself is the disk.
+    pub overlay: Option<(PathBuf, String)>,
+}
+
+impl Export {
+    /// What one connection at a time is enforced on: the overlay's map file, or the
+    /// image file.
+    pub fn key(&self) -> PathBuf {
+        match &self.overlay {
+            Some((dir, name)) => bootbob_cow::overlay_paths(dir, name).1,
+            None => self.path.clone(),
+        }
+    }
 }
 
 /// Bytes moved on one connection, reported when it ends.
@@ -99,16 +116,55 @@ pub trait Exports: Send + Sync + 'static {
     fn disconnected(&self, _export: &Export, _peer: SocketAddr, _stats: Stats, _why: &str) {}
 }
 
-/// The live connection per export file, so a new one can end the old.
+/// The live connection per export (by [`Export::key`]), so a new one can end the old,
+/// and so the rest of the server can ask whether a disk is in use.
 #[derive(Default)]
-struct Live {
+pub struct Live {
     next: AtomicU64,
-    by_path: Mutex<HashMap<PathBuf, (u64, oneshot::Sender<()>)>>,
+    by_key: Mutex<HashMap<PathBuf, (u64, oneshot::Sender<()>)>>,
+}
+
+impl Live {
+    pub fn in_use(&self, key: &std::path::Path) -> bool {
+        self.by_key.lock().unwrap().contains_key(key)
+    }
+
+    /// Takes the export, ending whoever had it. The returned receiver fires if someone
+    /// else takes it later.
+    fn claim(&self, key: PathBuf) -> (u64, oneshot::Receiver<()>) {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        if let Some((_, old)) = self.by_key.lock().unwrap().insert(key, (id, tx)) {
+            let _ = old.send(());
+        }
+        (id, rx)
+    }
+
+    /// For tests elsewhere: pretend a connection holds `key`.
+    pub fn claim_for_test(&self, key: PathBuf) -> (u64, oneshot::Receiver<()>) {
+        self.claim(key)
+    }
+
+    /// For tests elsewhere: the connection from [`Live::claim_for_test`] ended.
+    pub fn release_for_test(&self, key: &std::path::Path, id: u64) {
+        self.release(key, id)
+    }
+
+    fn release(&self, key: &std::path::Path, id: u64) {
+        let mut by = self.by_key.lock().unwrap();
+        if by.get(key).is_some_and(|(i, _)| *i == id) {
+            by.remove(key);
+        }
+    }
 }
 
 /// Serves NBD on `listener` until it fails.
 pub async fn serve<E: Exports>(listener: TcpListener, exports: Arc<E>) -> io::Result<()> {
-    let live = Arc::new(Live::default());
+    serve_with(listener, exports, Arc::new(Live::default())).await
+}
+
+/// [`serve`], sharing `live` with whoever wants to know what's in use.
+pub async fn serve_with<E: Exports>(listener: TcpListener, exports: Arc<E>, live: Arc<Live>) -> io::Result<()> {
     loop {
         let (sock, peer) = listener.accept().await?;
         let (exports, live) = (exports.clone(), live.clone());
@@ -122,30 +178,23 @@ pub async fn serve<E: Exports>(listener: TcpListener, exports: Arc<E>) -> io::Re
 
 async fn connection<E: Exports>(mut sock: TcpStream, peer: SocketAddr, exports: Arc<E>, live: Arc<Live>) -> io::Result<()> {
     sock.set_nodelay(true)?;
-    let Some((export, file, size)) = negotiate(&mut sock, peer, &*exports).await? else { return Ok(()) };
+    let Some((export, disk)) = negotiate(&mut sock, peer, &*exports).await? else { return Ok(()) };
+    let size = disk.size();
 
-    let id = live.next.fetch_add(1, Ordering::Relaxed);
-    let (kick_tx, mut kick_rx) = oneshot::channel();
-    if let Some((_, old)) = live.by_path.lock().unwrap().insert(export.path.clone(), (id, kick_tx)) {
-        let _ = old.send(());
-    }
+    let key = export.key();
+    let (id, mut kick_rx) = live.claim(key.clone());
     exports.connected(&export, peer);
-    tracing::info!(%peer, export = export.name, size, "NBD export in use");
+    tracing::info!(%peer, export = export.name, size, cow = export.overlay.is_some(), "NBD export in use");
 
     let mut stats = Stats::default();
     let result = tokio::select! {
-        r = transmission(&mut sock, &file, size, export.read_only, &mut stats) => r,
+        r = transmission(&mut sock, &disk, &mut stats) => r,
         _ = &mut kick_rx => Err(io::Error::other("replaced by a newer connection to the same export")),
     };
     // Whatever happened, what was written is on disk before anyone else gets the export.
-    let f = file.clone();
-    let _ = tokio::task::spawn_blocking(move || f.sync_data()).await;
-    {
-        let mut by = live.by_path.lock().unwrap();
-        if by.get(&export.path).is_some_and(|(i, _)| *i == id) {
-            by.remove(&export.path);
-        }
-    }
+    let d = disk.clone();
+    let _ = tokio::task::spawn_blocking(move || d.flush()).await;
+    live.release(&key, id);
     let why = match &result {
         Ok(()) => "disconnected".to_string(),
         Err(e) => e.to_string(),
@@ -168,19 +217,17 @@ fn tflags(read_only: bool) -> u16 {
     TFLAG_HAS_FLAGS | TFLAG_SEND_FLUSH | TFLAG_SEND_FUA | if read_only { TFLAG_READ_ONLY } else { 0 }
 }
 
-/// Opens an export's file. `Err` is the message for the client.
-fn open_file(export: &Export) -> Result<(Arc<File>, u64), String> {
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(!export.read_only)
-        .open(&export.path)
-        .map_err(|e| format!("can't open {}: {e}", export.name))?;
-    let size = f.metadata().map_err(|e| e.to_string())?.len();
-    Ok((Arc::new(f), size))
+/// Opens an export's disk. `Err` is the message for the client.
+fn open_disk(export: &Export) -> Result<Arc<dyn Disk>, String> {
+    let e = |e: io::Error| format!("can't open {}: {e}", export.name);
+    Ok(match &export.overlay {
+        Some((dir, name)) => Arc::new(Cow::open(&export.path, dir, name, export.read_only).map_err(e)?),
+        None => Arc::new(Plain::open(&export.path, export.read_only).map_err(e)?),
+    })
 }
 
 /// The handshake. `None`: the client went away or aborted without choosing an export.
-async fn negotiate<E: Exports>(sock: &mut TcpStream, peer: SocketAddr, exports: &E) -> io::Result<Option<(Export, Arc<File>, u64)>> {
+async fn negotiate<E: Exports>(sock: &mut TcpStream, peer: SocketAddr, exports: &E) -> io::Result<Option<(Export, Arc<dyn Disk>)>> {
     let mut hello = Vec::with_capacity(18);
     hello.extend_from_slice(&NBDMAGIC.to_be_bytes());
     hello.extend_from_slice(&IHAVEOPT.to_be_bytes());
@@ -215,15 +262,21 @@ async fn negotiate<E: Exports>(sock: &mut TcpStream, peer: SocketAddr, exports: 
                         return Ok(None);
                     }
                 };
-                let Ok((file, size)) = open_file(&export) else { return Ok(None) };
+                let disk = match open_disk(&export) {
+                    Ok(d) => d,
+                    Err(why) => {
+                        tracing::warn!(%peer, name, "{why}");
+                        return Ok(None);
+                    }
+                };
                 let mut b = Vec::with_capacity(134);
-                b.extend_from_slice(&size.to_be_bytes());
-                b.extend_from_slice(&tflags(export.read_only).to_be_bytes());
+                b.extend_from_slice(&disk.size().to_be_bytes());
+                b.extend_from_slice(&tflags(disk.read_only()).to_be_bytes());
                 if !no_zeroes {
                     b.extend_from_slice(&[0u8; 124]);
                 }
                 sock.write_all(&b).await?;
-                return Ok(Some((export, file, size)));
+                return Ok(Some((export, disk)));
             }
             OPT_ABORT => {
                 let _ = opt_reply(sock, opt, REP_ACK, &[]).await;
@@ -261,16 +314,17 @@ async fn negotiate<E: Exports>(sock: &mut TcpStream, peer: SocketAddr, exports: 
                         continue;
                     }
                 };
-                let (file, size) = match open_file(&export) {
-                    Ok(v) => v,
+                let disk = match open_disk(&export) {
+                    Ok(d) => d,
                     Err(why) => {
+                        tracing::warn!(%peer, name, "{why}");
                         opt_reply(sock, opt, REP_ERR_UNKNOWN, why.as_bytes()).await?;
                         continue;
                     }
                 };
                 let mut info = INFO_EXPORT.to_be_bytes().to_vec();
-                info.extend_from_slice(&size.to_be_bytes());
-                info.extend_from_slice(&tflags(export.read_only).to_be_bytes());
+                info.extend_from_slice(&disk.size().to_be_bytes());
+                info.extend_from_slice(&tflags(disk.read_only()).to_be_bytes());
                 opt_reply(sock, opt, REP_INFO, &info).await?;
                 let mut bs = INFO_BLOCK_SIZE.to_be_bytes().to_vec();
                 for v in [1u32, 4096, MAX_REQUEST] {
@@ -279,50 +333,12 @@ async fn negotiate<E: Exports>(sock: &mut TcpStream, peer: SocketAddr, exports: 
                 opt_reply(sock, opt, REP_INFO, &bs).await?;
                 opt_reply(sock, opt, REP_ACK, &[]).await?;
                 if opt == OPT_GO {
-                    return Ok(Some((export, file, size)));
+                    return Ok(Some((export, disk)));
                 }
             }
             _ => opt_reply(sock, opt, REP_ERR_UNSUP, b"not supported").await?,
         }
     }
-}
-
-#[cfg(unix)]
-fn read_at(f: &File, buf: &mut [u8], off: u64) -> io::Result<()> {
-    use std::os::unix::fs::FileExt;
-    f.read_exact_at(buf, off)
-}
-
-#[cfg(unix)]
-fn write_at(f: &File, buf: &[u8], off: u64) -> io::Result<()> {
-    use std::os::unix::fs::FileExt;
-    f.write_all_at(buf, off)
-}
-
-#[cfg(windows)]
-fn read_at(f: &File, mut buf: &mut [u8], mut off: u64) -> io::Result<()> {
-    use std::os::windows::fs::FileExt;
-    while !buf.is_empty() {
-        match f.seek_read(buf, off)? {
-            0 => return Err(io::ErrorKind::UnexpectedEof.into()),
-            n => {
-                buf = &mut buf[n..];
-                off += n as u64;
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn write_at(f: &File, mut buf: &[u8], mut off: u64) -> io::Result<()> {
-    use std::os::windows::fs::FileExt;
-    while !buf.is_empty() {
-        let n = f.seek_write(buf, off)?;
-        buf = &buf[n..];
-        off += n as u64;
-    }
-    Ok(())
 }
 
 async fn reply(sock: &mut TcpStream, error: u32, handle: u64, data: &[u8]) -> io::Result<()> {
@@ -341,7 +357,9 @@ fn errno(e: &io::Error) -> u32 {
     }
 }
 
-async fn transmission(sock: &mut TcpStream, file: &Arc<File>, size: u64, read_only: bool, stats: &mut Stats) -> io::Result<()> {
+async fn transmission(sock: &mut TcpStream, disk: &Arc<dyn Disk>, stats: &mut Stats) -> io::Result<()> {
+    let size = disk.size();
+    let read_only = disk.read_only();
     let mut hdr = [0u8; 28];
     loop {
         sock.read_exact(&mut hdr).await?;
@@ -362,10 +380,10 @@ async fn transmission(sock: &mut TcpStream, file: &Arc<File>, size: u64, read_on
                     reply(sock, EINVAL, handle, &[]).await?;
                     continue;
                 }
-                let f = file.clone();
+                let d = disk.clone();
                 let r = tokio::task::spawn_blocking(move || {
                     let mut buf = vec![0u8; len as usize];
-                    read_at(&f, &mut buf, offset).map(|_| buf)
+                    d.read_at(&mut buf, offset).map(|_| buf)
                 })
                 .await
                 .map_err(io::Error::other)?;
@@ -392,11 +410,11 @@ async fn transmission(sock: &mut TcpStream, file: &Arc<File>, size: u64, read_on
                     reply(sock, ENOSPC, handle, &[]).await?;
                     continue;
                 }
-                let f = file.clone();
+                let d = disk.clone();
                 let fua = flags & CMD_FLAG_FUA != 0;
                 let r = tokio::task::spawn_blocking(move || {
-                    write_at(&f, &buf, offset)?;
-                    if fua { f.sync_data() } else { Ok(()) }
+                    d.write_at(&buf, offset)?;
+                    if fua { d.flush() } else { Ok(()) }
                 })
                 .await
                 .map_err(io::Error::other)?;
@@ -409,8 +427,8 @@ async fn transmission(sock: &mut TcpStream, file: &Arc<File>, size: u64, read_on
                 }
             }
             CMD_FLUSH => {
-                let f = file.clone();
-                let r = tokio::task::spawn_blocking(move || f.sync_data()).await.map_err(io::Error::other)?;
+                let d = disk.clone();
+                let r = tokio::task::spawn_blocking(move || d.flush()).await.map_err(io::Error::other)?;
                 reply(sock, r.as_ref().map(|_| 0).unwrap_or_else(errno), handle, &[]).await?;
             }
             CMD_DISC => return Ok(()),

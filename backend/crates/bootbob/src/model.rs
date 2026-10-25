@@ -146,6 +146,10 @@ pub struct PiBoot {
     /// Lines added to the end of the tree's `config.txt`, same placeholders.
     #[serde(default)]
     pub config: String,
+    /// Each machine gets its own copy-on-write overlay of the disk image, which is then
+    /// never written: one golden image for any number of Pis. Needs a disk image source.
+    #[serde(default)]
+    pub cow: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

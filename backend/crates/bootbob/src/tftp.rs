@@ -152,7 +152,16 @@ impl Tftp {
             Ok(Some(Content::Memory(Bytes::from(format!("{}\n", fill(pi.cmdline.trim()))))))
         } else {
             let (src, f) = (source.clone(), file.to_string());
-            match tokio::task::spawn_blocking(move || bootbob_pi::find(&src, &f)).await {
+            // A copy-on-write image: the machine's own view of it, once it has one (a
+            // kernel it installed lives in its overlay). Until then, the image itself.
+            let cow = pi.cow.then(|| (crate::nbd::overlay_dir(&self.st, mac), crate::nbd::overlay_name(&pi.source).to_string()));
+            let look = move || match cow {
+                Some((dir, name)) if bootbob_cow::Cow::exists(&dir, &name) => {
+                    bootbob_pi::find_on(&bootbob_cow::Cow::open(&src, &dir, &name, true)?, &f)
+                }
+                _ => bootbob_pi::find(&src, &f),
+            };
+            match tokio::task::spawn_blocking(look).await {
                 Ok(Ok(found)) => {
                     let found = if lower == "config.txt" && !pi.config.trim().is_empty() {
                         let base = match found {

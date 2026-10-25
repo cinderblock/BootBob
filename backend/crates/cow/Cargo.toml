@@ -1,0 +1,13 @@
+[package]
+name = "bootbob-cow"
+description = "Disks as files: plain disk images, and copy-on-write overlays over a shared read-only base"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+tempfile.workspace = true

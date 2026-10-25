@@ -91,12 +91,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bootbob-cow",
  "bootbob-dhcp",
  "bootbob-ipxe",
  "bootbob-nbd",
  "bootbob-pi",
  "bootbob-tftp",
  "bytes",
+ "fatfs",
  "futures-util",
  "http-body-util",
  "redb",
@@ -110,6 +112,13 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "bootbob-cow"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
@@ -132,6 +141,7 @@ dependencies = [
 name = "bootbob-nbd"
 version = "0.1.0"
 dependencies = [
+ "bootbob-cow",
  "tempfile",
  "tokio",
  "tracing",
@@ -141,6 +151,7 @@ dependencies = [
 name = "bootbob-pi"
 version = "0.1.0"
 dependencies = [
+ "bootbob-cow",
  "bootbob-dhcp",
  "fatfs",
  "serde",

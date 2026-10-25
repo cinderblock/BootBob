@@ -5,7 +5,8 @@
 #   bootbob-dhcp   DHCP parsing, the passive listener, firmware arch detection
 #   bootbob-ipxe   iPXE script generation (fallback menu, boot scripts)
 #   bootbob-pi     Raspberry Pi boot: bootloader request paths, boot files from dirs or disk images
-#   bootbob-nbd    NBD server: disk image files as network block devices (network roots)
+#   bootbob-cow    disks as files: plain images, and copy-on-write overlays over a shared base
+#   bootbob-nbd    NBD server: disks as network block devices (network roots)
 #   bootbob        the server binary: config, device store, resolver, HTTP API, web UI
 
 [workspace]
@@ -25,6 +26,7 @@ bootbob-dhcp = { path = "crates/dhcp" }
 bootbob-ipxe = { path = "crates/ipxe" }
 bootbob-pi = { path = "crates/pi" }
 bootbob-nbd = { path = "crates/nbd" }
+bootbob-cow = { path = "crates/cow" }
 
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "json"] }

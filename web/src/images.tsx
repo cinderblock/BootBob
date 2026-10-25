@@ -49,6 +49,7 @@ const blank = (): Draft => ({
   source: "",
   piCmdline: "",
   piConfig: "",
+  piCow: false,
   keepAction: null,
   keepPi: null,
 });
@@ -66,6 +67,7 @@ interface Draft {
   source: string;
   piCmdline: string;
   piConfig: string;
+  piCow: boolean;
   /** The half the editor isn't showing, kept as it was: an image can have both. */
   keepAction: Action | null;
   keepPi: PiBoot | null;
@@ -73,7 +75,7 @@ interface Draft {
 
 function toDraft(i: Image): Draft {
   const d = { ...blank(), id: i.id, title: i.title, group: i.group, keepAction: i.action, keepPi: i.pi };
-  if (i.pi && !i.action) return { ...d, kind: "pi", source: i.pi.source, piCmdline: i.pi.cmdline, piConfig: i.pi.config };
+  if (i.pi && !i.action) return { ...d, kind: "pi", source: i.pi.source, piCmdline: i.pi.cmdline, piConfig: i.pi.config, piCow: i.pi.cow };
   const a = i.action;
   if (a?.kind === "chain") return { ...d, kind: "chain", url: a.url };
   if (a?.kind === "kernel") return { ...d, kind: "kernel", kernel: a.kernel, initrds: a.initrds.join("\n"), cmdline: a.cmdline };
@@ -83,7 +85,9 @@ function toDraft(i: Image): Draft {
 
 /** The image's `action` and `pi` from the editor. */
 function toBoot(d: Draft): { action: Action | null; pi: PiBoot | null } {
-  if (d.kind === "pi") return { action: d.keepAction, pi: { source: d.source.trim(), cmdline: d.piCmdline.trim(), config: d.piConfig.trim() } };
+  if (d.kind === "pi") {
+    return { action: d.keepAction, pi: { source: d.source.trim(), cmdline: d.piCmdline.trim(), config: d.piConfig.trim(), cow: d.piCow } };
+  }
   return { action: toAction(d), pi: d.keepPi };
 }
 
@@ -267,6 +271,10 @@ export function Images({ live }: { live: Live }) {
               <p className="muted small">
                 Both can use {"{serial}"}, {"{mac}"}, {"{ip}"} and {"{server}"}, filled in for each Pi.
               </p>
+              <label title="One golden image for any number of Pis: each writes to its own overlay, and the image stays pristine. Needs a disk image (.img), served over NBD.">
+                <input type="checkbox" checked={draft.piCow} onChange={(e) => set({ piCow: e.currentTarget.checked })} /> Copy-on-write: each
+                machine gets its own overlay, the image is never written
+              </label>
             </>
           )}
           {draft.kind === "script" && (

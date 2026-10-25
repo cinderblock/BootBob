@@ -30,6 +30,8 @@ pub fn router(st: St) -> Router {
         .route("/api/devices", get(list_devices))
         .route("/api/devices/{mac}", get(get_device).patch(patch_device).delete(delete_device))
         .route("/api/devices/{mac}/assignment", put(put_assignment).delete(delete_assignment))
+        .route("/api/devices/{mac}/overlays", get(list_overlays))
+        .route("/api/devices/{mac}/overlays/{source}", axum::routing::delete(reset_overlay))
         .route("/api/images", get(list_images))
         .route("/api/images/{id}", put(put_image).delete(delete_image))
         .route("/api/pi/sources", get(pi_sources))
@@ -437,6 +439,20 @@ async fn put_image(Ax(st): Ax<St>, Path(id): Path<String>, Json(mut img): Json<I
     img.id = id;
     st.put_image(img.clone()).map_err(bad)?;
     Ok(Json(img))
+}
+
+async fn list_overlays(Ax(st): Ax<St>, Path(mac): Path<String>) -> Result<Json<Vec<crate::nbd::OverlayInfo>>, ApiError> {
+    let mac = parse_mac(&mac)?;
+    Ok(Json(tokio::task::spawn_blocking(move || crate::nbd::overlays(&st, mac)).await.unwrap_or_default()))
+}
+
+async fn reset_overlay(Ax(st): Ax<St>, Path((mac, source)): Path<(String, String)>) -> Result<StatusCode, ApiError> {
+    let mac = parse_mac(&mac)?;
+    match crate::nbd::reset_overlay(&st, mac, &source) {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(not_found("overlay")),
+        Err((code, msg)) => Err(ApiError(StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), msg)),
+    }
 }
 
 async fn pi_sources(Ax(st): Ax<St>) -> Json<Vec<bootbob_pi::SourceInfo>> {

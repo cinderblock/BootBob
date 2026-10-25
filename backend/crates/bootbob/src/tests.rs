@@ -588,3 +588,75 @@ async fn nbd_exports_go_only_to_the_machine_assigned_the_disk() {
     assert!(t.st.device(desky).unwrap().assignment.is_none());
     assert!(nbd.open("desky.img", peer(PI_IP)).is_ok());
 }
+
+#[tokio::test]
+async fn a_cow_image_gives_each_pi_its_own_overlay() {
+    use bootbob_cow::Disk;
+    use bootbob_nbd::Exports;
+    let t = setup();
+    // A tiny "disk image": a bare FAT volume with a Pi boot file, the kind TFTP reads.
+    let img = t.st.config.images_dir().join("golden.img");
+    {
+        let mut disk = std::io::Cursor::new(vec![0u8; 4 << 20]);
+        fatfs::format_volume(&mut disk, fatfs::FormatVolumeOptions::new()).unwrap();
+        let fs = fatfs::FileSystem::new(&mut disk, fatfs::FsOptions::new()).unwrap();
+        std::io::Write::write_all(&mut fs.root_dir().create_file("start4.elf").unwrap(), b"GOLDEN").unwrap();
+        drop(fs);
+        std::fs::write(&img, disk.into_inner()).unwrap();
+    }
+    let (s, body) = put_pi_image(&t, "tree-cow", json!({"source": "pios", "cow": true})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    pi_tree(&t);
+    let (s, body) = put_pi_image(&t, "golden", json!({"source": "golden.img", "cow": true})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    let (a, b): (Mac, Mac) = (PI.parse().unwrap(), "dc:a6:32:00:00:0b".parse().unwrap());
+    let (ip_a, ip_b) = (Ipv4Addr::from(PI_IP), Ipv4Addr::new(10, 255, 7, 41));
+    t.st.learn_address(ip_a, a);
+    t.st.learn_address(ip_b, b);
+    for m in [a, b] {
+        t.st.assign(m, Some(Assignment { image: "golden".into(), once: false, set_at: 0 })).unwrap();
+    }
+    let nbd = crate::nbd::Nbd { st: t.st.clone() };
+    let peer = |ip: Ipv4Addr| SocketAddr::from((ip, 40000));
+    let ex_a = nbd.open("golden.img", peer(ip_a)).unwrap();
+    let ex_b = nbd.open("golden.img", peer(ip_b)).unwrap();
+    assert!(ex_a.overlay.is_some() && ex_b.overlay.is_some());
+    assert_ne!(ex_a.key(), ex_b.key(), "one overlay per machine");
+    assert!(json(&t.st, &format!("/api/devices/{PI}/overlays")).await.as_array().unwrap().is_empty(), "nothing written yet");
+
+    // Machine A writes through its overlay; the image and machine B are untouched.
+    let before = std::fs::read(&img).unwrap();
+    {
+        let (dir, name) = ex_a.overlay.clone().unwrap();
+        let d = bootbob_cow::Cow::open(&ex_a.path, &dir, &name, false).unwrap();
+        d.write_at(b"A was here", 1 << 20).unwrap();
+        d.flush().unwrap();
+    }
+    assert_eq!(std::fs::read(&img).unwrap(), before);
+    let v = json(&t.st, &format!("/api/devices/{PI}/overlays")).await;
+    assert_eq!(v[0]["source"], "golden.img");
+    assert_eq!(v[0]["in_use"], false);
+    assert!(v[0]["allocated"].as_u64().unwrap() > 0);
+
+    // TFTP reads A's boot files through its overlay (here unchanged, so still golden),
+    // and B's straight from the image.
+    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    assert_eq!(pi_file(&tftp, PI_IP, "6a6f4d1d/start4.elf").await.unwrap(), b"GOLDEN");
+    assert_eq!(pi_file(&tftp, [10, 255, 7, 41], "start4.elf").await.unwrap(), b"GOLDEN");
+
+    // Reset: refused while connected, otherwise gone.
+    let (claim_id, _rx) = {
+        let key = ex_a.key();
+        // Stand in for a live connection.
+        t.st.nbd_live.claim_for_test(key.clone())
+    };
+    let (s, body) = call(&t.st, Method::DELETE, &format!("/api/devices/{PI}/overlays/golden.img"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    t.st.nbd_live.release_for_test(&ex_a.key(), claim_id);
+    let (s, _) = call(&t.st, Method::DELETE, &format!("/api/devices/{PI}/overlays/golden.img"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = call(&t.st, Method::DELETE, &format!("/api/devices/{PI}/overlays/golden.img"), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(json(&t.st, &format!("/api/devices/{PI}/overlays")).await.as_array().unwrap().is_empty());
+}

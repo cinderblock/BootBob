@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+bootbob-cow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

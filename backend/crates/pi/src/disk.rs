@@ -1,9 +1,10 @@
 //! Boot files out of a disk image, without unpacking it: find the FAT boot partition
-//! (MBR, GPT, or the whole file being one FAT filesystem) and read through `fatfs`.
+//! (MBR, GPT, or the whole image being one FAT filesystem) and read through `fatfs`.
+//! The image is any [`Disk`]: a plain file, or a machine's copy-on-write view of one.
 
-use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+
+use bootbob_cow::Disk;
 
 /// Disk images use 512-byte sectors (Pi OS, and anything `dd`'d from an SD card).
 const SECTOR: u64 = 512;
@@ -36,12 +37,18 @@ fn is_fat_boot_sector(s: &[u8]) -> bool {
     matches!(s[0], 0xeb | 0xe9) && matches!(bps, 512 | 1024 | 2048 | 4096) && (&s[54..57] == b"FAT" || &s[82..85] == b"FAT")
 }
 
+fn read_exact(disk: &dyn Disk, buf: &mut [u8], off: u64) -> io::Result<()> {
+    if off + buf.len() as u64 > disk.size() {
+        return Err(invalid("too small to be a disk image"));
+    }
+    disk.read_at(buf, off)
+}
+
 /// Byte offset and length of the FAT boot partition.
-fn fat_partition(file: &mut File) -> io::Result<(u64, u64)> {
-    let len = file.metadata()?.len();
+fn fat_partition(disk: &dyn Disk) -> io::Result<(u64, u64)> {
+    let len = disk.size();
     let mut s0 = [0u8; 512];
-    file.seek(SeekFrom::Start(0))?;
-    file.read_exact(&mut s0).map_err(|_| invalid("too small to be a disk image"))?;
+    read_exact(disk, &mut s0, 0)?;
     if is_fat_boot_sector(&s0) {
         return Ok((0, len));
     }
@@ -50,7 +57,7 @@ fn fat_partition(file: &mut File) -> io::Result<(u64, u64)> {
     }
     let entries: Vec<&[u8]> = (0..4).map(|i| &s0[446 + i * 16..446 + (i + 1) * 16]).collect();
     if entries.iter().any(|e| e[4] == 0xee) {
-        return gpt_partition(file);
+        return gpt_partition(disk);
     }
     for e in entries {
         let (start, count) = (u32le(e, 8) as u64, u32le(e, 12) as u64);
@@ -61,10 +68,9 @@ fn fat_partition(file: &mut File) -> io::Result<(u64, u64)> {
     Err(invalid("the partition table has no FAT partition"))
 }
 
-fn gpt_partition(file: &mut File) -> io::Result<(u64, u64)> {
+fn gpt_partition(disk: &dyn Disk) -> io::Result<(u64, u64)> {
     let mut hdr = [0u8; 92];
-    file.seek(SeekFrom::Start(SECTOR))?;
-    file.read_exact(&mut hdr)?;
+    read_exact(disk, &mut hdr, SECTOR)?;
     if &hdr[0..8] != b"EFI PART" {
         return Err(invalid("a protective MBR but no GPT header"));
     }
@@ -73,8 +79,7 @@ fn gpt_partition(file: &mut File) -> io::Result<(u64, u64)> {
         return Err(invalid("a GPT header with an implausible partition table"));
     }
     let mut buf = vec![0u8; (count * size) as usize];
-    file.seek(SeekFrom::Start(table * SECTOR))?;
-    file.read_exact(&mut buf)?;
+    read_exact(disk, &mut buf, table * SECTOR)?;
     for e in buf.chunks(size as usize) {
         if e[0..16] == GPT_ESP || e[0..16] == GPT_BASIC_DATA {
             let (first, last) = (u64le(e, 32), u64le(e, 40));
@@ -86,29 +91,33 @@ fn gpt_partition(file: &mut File) -> io::Result<(u64, u64)> {
     Err(invalid("the GPT has no FAT (EFI system or basic data) partition"))
 }
 
-/// A read-only window onto part of a file, which is what `fatfs` mounts.
-struct Window {
-    file: File,
+/// A read-only window onto part of a disk, which is what `fatfs` mounts.
+struct Window<'a> {
+    disk: &'a dyn Disk,
     start: u64,
     len: u64,
     pos: u64,
 }
 
-impl Read for Window {
+impl Read for Window<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let left = self.len.saturating_sub(self.pos);
         let n = (buf.len() as u64).min(left) as usize;
         if n == 0 {
             return Ok(0);
         }
-        self.file.seek(SeekFrom::Start(self.start + self.pos))?;
-        let got = self.file.read(&mut buf[..n])?;
-        self.pos += got as u64;
-        Ok(got)
+        // The partition table may claim more than the image holds: stop at the image.
+        let n = ((self.disk.size().saturating_sub(self.start + self.pos)) as usize).min(n);
+        if n == 0 {
+            return Ok(0);
+        }
+        self.disk.read_at(&mut buf[..n], self.start + self.pos)?;
+        self.pos += n as u64;
+        Ok(n)
     }
 }
 
-impl Seek for Window {
+impl Seek for Window<'_> {
     fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
         let new = match to {
             SeekFrom::Start(n) => Some(n),
@@ -120,10 +129,10 @@ impl Seek for Window {
     }
 }
 
-/// `fatfs` wants a writable device; BootBob never writes to an image.
-impl Write for Window {
+/// `fatfs` wants a writable device; BootBob never writes to an image this way.
+impl Write for Window<'_> {
     fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "BootBob opens disk images read-only"))
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "BootBob reads boot files, it doesn't write them"))
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -131,11 +140,10 @@ impl Write for Window {
     }
 }
 
-/// Reads one file out of the image's FAT boot partition.
-pub fn read(image: &Path, path: &str) -> io::Result<Option<Vec<u8>>> {
-    let mut file = File::open(image)?;
-    let (start, len) = fat_partition(&mut file)?;
-    let fs = fatfs::FileSystem::new(Window { file, start, len, pos: 0 }, fatfs::FsOptions::new())
+/// Reads one file out of the disk's FAT boot partition.
+pub fn read(disk: &dyn Disk, path: &str) -> io::Result<Option<Vec<u8>>> {
+    let (start, len) = fat_partition(disk)?;
+    let fs = fatfs::FileSystem::new(Window { disk, start, len, pos: 0 }, fatfs::FsOptions::new())
         .map_err(|e| invalid(format!("the boot partition isn't a readable FAT filesystem: {e}")))?;
     let mut dir = fs.root_dir();
     let mut parts = path.split('/').peekable();

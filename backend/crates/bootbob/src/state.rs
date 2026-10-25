@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::Ipv4Addr;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use bootbob_dhcp::listener::Seen;
 use bootbob_dhcp::{Firmware, Mac, MessageType};
@@ -61,6 +61,8 @@ pub struct State {
     probes: Mutex<HashMap<u32, Vec<crate::doctor::Offer>>>,
     report: Mutex<Option<crate::doctor::Report>>,
     changes: broadcast::Sender<Change>,
+    /// Which NBD exports are connected right now (shared with the NBD server).
+    pub nbd_live: Arc<bootbob_nbd::Live>,
 }
 
 impl State {
@@ -91,6 +93,7 @@ impl State {
             probes: Mutex::new(HashMap::new()),
             report: Mutex::new(None),
             changes,
+            nbd_live: Arc::new(bootbob_nbd::Live::default()),
         })
     }
 
@@ -195,6 +198,9 @@ impl State {
         }
         if let Some(pi) = &image.pi {
             bootbob_pi::resolve_source(&self.config.images_dir(), &pi.source)?;
+            if pi.cow && !pi.source.ends_with(".img") {
+                return Err("copy-on-write needs a disk image (.img) source, not a directory".into());
+            }
         }
         self.store.put(Table::Images, &image.id, &image).map_err(|e| e.to_string())?;
         self.images.write().unwrap().insert(image.id.clone(), Image { builtin: false, ..image });

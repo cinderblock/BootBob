@@ -13,12 +13,22 @@ impl Exports for Dir {
             return Err("not for you".into());
         }
         match name {
-            "disk" | "ro" => Ok(Export { name: name.into(), path: self.0.join(format!("{name}.img")), read_only: name == "ro" }),
+            "disk" | "ro" => {
+                Ok(Export { name: name.into(), path: self.0.join(format!("{name}.img")), read_only: name == "ro", overlay: None })
+            }
+            // A copy-on-write view of ro.img, one overlay per client port (the test's stand-in
+            // for "per machine").
+            "cow" => Ok(Export {
+                name: name.into(),
+                path: self.0.join("ro.img"),
+                read_only: false,
+                overlay: Some((self.0.join("overlays"), format!("port-{}", peer.port()))),
+            }),
             _ => Err(format!("no export {name:?}")),
         }
     }
     fn list(&self, _: SocketAddr) -> Vec<String> {
-        vec!["disk".into(), "ro".into()]
+        vec!["disk".into(), "ro".into(), "cow".into()]
     }
 }
 
@@ -161,7 +171,7 @@ async fn list_info_unknown_and_refused() {
             other => panic!("{other:?}"),
         }
     }
-    assert_eq!(names, vec!["disk", "ro"]);
+    assert_eq!(names, vec!["disk", "ro", "cow"]);
     assert_eq!(c.go("nope").await.unwrap_err().0, REP_ERR_UNKNOWN);
     c.option(42, &[]).await;
     assert_eq!(c.opt_reply().await.0, REP_ERR_UNSUP);
@@ -213,4 +223,27 @@ async fn a_new_connection_to_an_export_ends_the_old_one() {
     let mut b = [0u8; 1];
     let n = tokio::time::timeout(std::time::Duration::from_secs(5), old.s.read(&mut b)).await.unwrap();
     assert!(matches!(n, Ok(0) | Err(_)), "the old connection is closed");
+}
+
+#[tokio::test]
+async fn a_cow_export_writes_to_the_overlay_and_leaves_the_base_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = server(dir.path()).await;
+    let mut c = Client::connect(addr).await;
+    let (size, flags) = c.go("cow").await.unwrap();
+    assert_eq!(size, 65536);
+    assert_eq!(flags & TFLAG_READ_ONLY, 0, "writable, through the overlay");
+    assert_eq!(c.request(CMD_READ, 0, 256, 4, &[]).await, (0, vec![0, 1, 2, 3]));
+    assert_eq!(c.request(CMD_WRITE, CMD_FLAG_FUA, 258, 2, b"XY").await.0, 0);
+    assert_eq!(c.request(CMD_READ, 0, 256, 5, &[]).await, (0, vec![0, 1, b'X', b'Y', 4]));
+    assert_eq!(c.request(CMD_FLUSH, 0, 0, 0, &[]).await.0, 0);
+    let base = std::fs::read(dir.path().join("ro.img")).unwrap();
+    assert_eq!(&base[256..261], &[0, 1, 2, 3, 4], "the base is untouched");
+    let port = c.s.local_addr().unwrap().port();
+    assert!(bootbob_cow::Cow::exists(&dir.path().join("overlays"), &format!("port-{port}")));
+
+    // Another client has its own overlay: it sees the base.
+    let mut other = Client::connect(addr).await;
+    other.go("cow").await.unwrap();
+    assert_eq!(other.request(CMD_READ, 0, 256, 5, &[]).await, (0, vec![0, 1, 2, 3, 4]));
 }

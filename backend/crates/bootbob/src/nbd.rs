@@ -5,11 +5,20 @@
 //! (or would get as the Pi default), or of the image it's running now. So a one-shot
 //! assignment, used up as the boot starts, still covers the root filesystem for the rest
 //! of that boot, and nobody else on the network can open someone's root disk.
+//!
+//! A Pi image marked copy-on-write hands each machine its own overlay of the disk
+//! (`<data_dir>/overlays/<mac>/<disk>.{ovl,map}`, see [`bootbob_cow`]); the image itself
+//! is then never written, so one golden image serves any number of Pis. Resetting a
+//! machine's overlay puts it back on the pristine image at its next boot.
 
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use bootbob_cow::Cow;
+use bootbob_dhcp::Mac;
 use bootbob_nbd::{Export, Exports, Stats};
+use serde::Serialize;
 
 use crate::state::State;
 
@@ -17,9 +26,33 @@ pub struct Nbd {
     pub st: Arc<State>,
 }
 
+/// Where a machine's overlays live.
+pub fn overlay_dir(st: &State, mac: Mac) -> PathBuf {
+    let m = mac.0;
+    st.config.overlays_dir().join(format!("{:02x}-{:02x}-{:02x}-{:02x}-{:02x}-{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]))
+}
+
+/// An overlay's name: the disk image's, without `.img` (`desky.img` → `desky.ovl`).
+pub fn overlay_name(source: &str) -> &str {
+    source.strip_suffix(".img").unwrap_or(source)
+}
+
+/// A disk a peer may use, and whether through an overlay.
+struct Allowed {
+    source: String,
+    cow: bool,
+}
+
 impl Nbd {
+    fn mac(&self, peer: SocketAddr) -> Option<Mac> {
+        match peer.ip() {
+            IpAddr::V4(a) => self.st.mac_for(a),
+            IpAddr::V6(a) => a.to_ipv4_mapped().and_then(|a| self.st.mac_for(a)),
+        }
+    }
+
     /// The disk images this peer may use.
-    fn allowed(&self, peer: SocketAddr) -> Result<Vec<String>, String> {
+    fn allowed(&self, peer: SocketAddr) -> Result<(Mac, Vec<Allowed>), String> {
         let ip = match peer.ip() {
             IpAddr::V4(a) => a,
             IpAddr::V6(a) => a.to_ipv4_mapped().ok_or("IPv6 clients aren't supported")?,
@@ -28,7 +61,13 @@ impl Nbd {
         let dev = self.st.device(mac).ok_or_else(|| format!("{mac} has never netbooted from BootBob"))?;
         let mut images: Vec<String> = self.st.resolve_pi(&dev).map(|r| r.image).into_iter().collect();
         images.extend(dev.last_boot.as_ref().map(|b| b.image.clone()));
-        Ok(images.iter().filter_map(|id| self.st.image(id)?.pi).map(|p| p.source).filter(|s| s.ends_with(".img")).collect())
+        let disks = images
+            .iter()
+            .filter_map(|id| self.st.image(id)?.pi)
+            .filter(|p| p.source.ends_with(".img"))
+            .map(|p| Allowed { source: p.source, cow: p.cow })
+            .collect();
+        Ok((mac, disks))
     }
 }
 
@@ -38,35 +77,78 @@ impl Exports for Nbd {
         if !path.is_file() {
             return Err(format!("no export {name:?}"));
         }
-        if !self.allowed(peer)?.iter().any(|s| s == name) {
+        let (mac, disks) = self.allowed(peer)?;
+        let Some(disk) = disks.iter().find(|d| d.source == name) else {
             return Err(format!("{name} isn't the disk of an image assigned to this machine"));
-        }
-        Ok(Export { name: name.to_string(), path, read_only: false })
+        };
+        let overlay = disk.cow.then(|| (overlay_dir(&self.st, mac), overlay_name(name).to_string()));
+        Ok(Export { name: name.to_string(), path, read_only: false, overlay })
     }
 
     fn list(&self, peer: SocketAddr) -> Vec<String> {
-        self.allowed(peer).unwrap_or_default()
+        self.allowed(peer).map(|(_, d)| d.into_iter().map(|d| d.source).collect()).unwrap_or_default()
     }
 
     fn connected(&self, export: &Export, peer: SocketAddr) {
-        let mac = self.mac(peer);
-        self.st.event(mac, "nbd", format!("Connected to disk {} (NBD)", export.name));
+        let how = if export.overlay.is_some() { ", through its own overlay" } else { "" };
+        self.st.event(self.mac(peer), "nbd", format!("Connected to disk {} (NBD{how})", export.name));
     }
 
     fn disconnected(&self, export: &Export, peer: SocketAddr, stats: Stats, why: &str) {
-        let mac = self.mac(peer);
         let mb = |b: u64| b.div_ceil(1 << 20);
-        self.st.event(mac, "nbd", format!("Disk {} (NBD) {why}: read {} MB, wrote {} MB", export.name, mb(stats.read), mb(stats.written)));
+        self.st.event(
+            self.mac(peer),
+            "nbd",
+            format!("Disk {} (NBD) {why}: read {} MB, wrote {} MB", export.name, mb(stats.read), mb(stats.written)),
+        );
     }
 }
 
-impl Nbd {
-    fn mac(&self, peer: SocketAddr) -> Option<bootbob_dhcp::Mac> {
-        match peer.ip() {
-            IpAddr::V4(a) => self.st.mac_for(a),
-            IpAddr::V6(a) => a.to_ipv4_mapped().and_then(|a| self.st.mac_for(a)),
-        }
+/// A machine's copy-on-write overlay, for the UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct OverlayInfo {
+    /// The disk image it is over, e.g. `pios.img`.
+    pub source: String,
+    /// Bytes the overlay occupies on disk.
+    pub allocated: u64,
+    /// A machine is connected to it now (so it can't be reset).
+    pub in_use: bool,
+}
+
+/// The overlays a machine has.
+pub fn overlays(st: &State, mac: Mac) -> Vec<OverlayInfo> {
+    let dir = overlay_dir(st, mac);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out: Vec<OverlayInfo> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let stem = name.strip_suffix(".map")?.to_string();
+            Some(OverlayInfo {
+                source: format!("{stem}.img"),
+                allocated: Cow::allocated(&dir, &stem).unwrap_or(0),
+                in_use: st.nbd_live.in_use(&bootbob_cow::overlay_paths(&dir, &stem).1),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.source.cmp(&b.source));
+    out
+}
+
+/// Deletes a machine's overlay of `source`: back on the pristine image at its next boot.
+/// Refused while the machine is connected to it. `Ok(true)` when something was removed.
+pub fn reset_overlay(st: &State, mac: Mac, source: &str) -> Result<bool, (u16, String)> {
+    let dir = overlay_dir(st, mac);
+    let name = overlay_name(source);
+    if !Cow::exists(&dir, name) {
+        return Ok(false);
     }
+    if st.nbd_live.in_use(&bootbob_cow::overlay_paths(&dir, name).1) {
+        return Err((409, format!("{} is running from its overlay of {source}; power it off first", mac.short())));
+    }
+    Cow::remove(&dir, name).map_err(|e| (500, format!("can't remove the overlay: {e}")))?;
+    st.event(Some(mac), "disk", format!("Overlay of {source} reset: back on the image at the next boot"));
+    Ok(true)
 }
 
 /// Creates an empty (sparse) disk image in the images directory, for a machine to

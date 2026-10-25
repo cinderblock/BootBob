@@ -87,8 +87,9 @@ async fn main() -> anyhow::Result<()> {
             Ok(l) => {
                 tracing::info!(%addr, "NBD: listening");
                 let exports = Arc::new(nbd::Nbd { st: st.clone() });
+                let live = st.nbd_live.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = bootbob_nbd::serve(l, exports).await {
+                    if let Err(e) = bootbob_nbd::serve_with(l, exports, live).await {
                         tracing::error!("NBD stopped: {e}");
                     }
                 });

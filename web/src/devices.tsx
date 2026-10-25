@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type BootEvent, type Device } from "./api";
+import { api, type BootEvent, type Device, type Overlay } from "./api";
 import type { Live } from "./live";
 import { ago, fullTime } from "./time";
 
@@ -92,6 +92,12 @@ function DeviceRow({ d, live, now, open, toggle }: { d: Device; live: Live; now:
   );
 }
 
+function fmtBytes(n: number): string {
+  if (n < 1 << 20) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1 << 30) return `${(n / (1 << 20)).toFixed(0)} MB`;
+  return `${(n / (1 << 30)).toFixed(1)} GB`;
+}
+
 function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) {
   const [image, setImage] = useState(d.assignment?.image ?? "");
   const [once, setOnce] = useState(d.assignment?.once ?? d.state === "at_menu");
@@ -100,15 +106,21 @@ function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) 
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<BootEvent[]>([]);
   const [confirmForget, setConfirmForget] = useState(false);
+  const [overlays, setOverlays] = useState<Overlay[]>([]);
 
   // This machine's log, refreshed whenever the global log moves.
   useEffect(() => {
     api.events(d.mac).then(setEvents, () => {});
   }, [d.mac, live.events.length, live.events[live.events.length - 1]?.at]);
 
+  // Its copy-on-write overlays, refreshed with the log (connects and resets land there).
+  const isPi = d.firmware === "rpi";
+  useEffect(() => {
+    if (isPi) api.overlays(d.mac).then(setOverlays, () => setOverlays([]));
+  }, [d.mac, isPi, live.events.length, live.events[live.events.length - 1]?.at]);
+
   const run = (p: Promise<unknown>) => p.then(() => setError(null), (e: Error) => setError(e.message));
   // A Pi boots only images with Pi boot files; a PC only those with an iPXE action.
-  const isPi = d.firmware === "rpi";
   const bootable = live.images.filter((i) => (isPi ? i.pi !== null : i.action !== null || i.id === "menu"));
 
   return (
@@ -150,6 +162,30 @@ function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) 
         </form>
         {d.state === "at_menu" && <p className="muted small">It's waiting at the menu, so it picks this up at its next check-in.</p>}
         {error && <p className="error">{error}</p>}
+
+        {overlays.length > 0 && (
+          <>
+            <h3>Its own changes</h3>
+            <p className="muted small">
+              Copy-on-write overlays: what this machine has written over a shared image. Resetting one puts it back on the
+              pristine image at its next boot.
+            </p>
+            <ul className="overlays">
+              {overlays.map((o) => (
+                <li key={o.source}>
+                  <strong>{o.source}</strong> <span className="muted">{fmtBytes(o.allocated)} written</span>{" "}
+                  {o.in_use ? (
+                    <span className="tag">in use</span>
+                  ) : (
+                    <button className="secondary" onClick={() => run(api.resetOverlay(d.mac, o.source))}>
+                      Reset to image
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
 
         <h3>Name and notes</h3>
         <form

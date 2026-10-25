@@ -65,6 +65,15 @@ export interface PiBoot {
   source: string;
   cmdline: string;
   config: string;
+  /** Each machine gets its own copy-on-write overlay; the image itself is never written. */
+  cow: boolean;
+}
+
+/** A machine's copy-on-write overlay of a disk image. */
+export interface Overlay {
+  source: string;
+  allocated: number;
+  in_use: boolean;
 }
 
 export interface PiSource {
@@ -146,6 +155,8 @@ export const api = {
   putImage: (img: Omit<Image, "builtin">) => call<Image>("PUT", `/api/images/${encodeURIComponent(img.id)}`, img),
   deleteImage: (id: string) => call<void>("DELETE", `/api/images/${encodeURIComponent(id)}`),
   piSources: () => call<PiSource[]>("GET", "/api/pi/sources"),
+  overlays: (mac: string) => call<Overlay[]>("GET", `/api/devices/${mac}/overlays`),
+  resetOverlay: (mac: string, source: string) => call<void>("DELETE", `/api/devices/${mac}/overlays/${encodeURIComponent(source)}`),
   settings: () => call<Settings>("GET", "/api/settings"),
   putSettings: (s: Settings) => call<Settings>("PUT", "/api/settings", s),
   events: (mac?: string) => call<BootEvent[]>("GET", `/api/events${mac ? `?mac=${mac}` : ""}`),

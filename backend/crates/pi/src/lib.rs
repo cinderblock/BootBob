@@ -81,7 +81,14 @@ pub fn find(source: &Path, path: &str) -> io::Result<Option<Found>> {
         let meta = fs::metadata(&here)?;
         return Ok(meta.is_file().then_some(Found::Path { path: here, size: meta.len() }));
     }
-    disk::read(source, path).map(|o| o.map(Found::Bytes))
+    let disk = bootbob_cow::Plain::open(source, true)?;
+    find_on(&disk, path)
+}
+
+/// [`find`] on an open disk (a plain image, or a machine's copy-on-write view of one).
+/// Blocking.
+pub fn find_on(disk: &dyn bootbob_cow::Disk, path: &str) -> io::Result<Option<Found>> {
+    disk::read(disk, path).map(|o| o.map(Found::Bytes))
 }
 
 /// What a source looks like, for the web UI.

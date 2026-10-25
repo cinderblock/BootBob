@@ -71,6 +71,16 @@ updates the Pi installs land in the same image, so the next boot uses them.
 A disk image is exported only to the machine assigned the Pi image it belongs to (or the
 one running it now). `POST /api/disks` creates an empty one to fill over NBD.
 
+**One image, many Pis.** Mark a Pi image *copy-on-write* and each machine gets its own
+overlay of the disk (`<data_dir>/overlays/<mac>/`): a sparse file holding only the 4 KiB
+chunks that machine has written, and a map of which they are. Reads come from the overlay
+where it has the chunk and from the image elsewhere; the image itself is never written, so
+it stays the golden copy. TFTP reads a machine's boot files through its overlay too, so a
+kernel update it installs is what it boots next time. The web UI shows how much each
+machine has written and can reset it to the pristine image (not while it's running from
+it). Replacing the image file with one of a different size invalidates the overlays made
+over it; reset them.
+
 Every file of one boot comes from the image it started with, so a "next boot only"
 assignment lasts the whole boot. A Pi with nothing to boot gets nothing, keeps asking, and
 shows up in the web UI as waiting.
@@ -102,7 +112,7 @@ Without a config, BootBob serves HTTP on `:8067` and TFTP on `:69` from `./data`
 
 | Path | What |
 | --- | --- |
-| `backend/` | Rust workspace: `bootbob` (the server), `bootbob-tftp`, `bootbob-dhcp`, `bootbob-ipxe`, `bootbob-pi`, `bootbob-nbd` |
+| `backend/` | Rust workspace: `bootbob` (the server), `bootbob-tftp`, `bootbob-dhcp`, `bootbob-ipxe`, `bootbob-pi`, `bootbob-cow`, `bootbob-nbd` |
 | `web/` | The web UI: Preact (via preact/compat), Vite, TypeScript, Bun |
 | `ipxe/` | iPXE build: pinned commit, embedded script, build options |
 | `e2e/` | End-to-end test: SeaBIOS and OVMF VMs netboot from BootBob in QEMU |
@@ -133,6 +143,8 @@ for throwaway VMs.
 | `PUT /api/devices/{mac}/assignment` | `{"image": "debian", "once": true}` |
 | `DELETE /api/devices/{mac}/assignment` | Back to the default |
 | `GET /api/images`, `PUT/DELETE /api/images/{id}` | The catalogue: an iPXE `action` (kernel, chain or script), a Raspberry Pi boot tree (`pi`), or both |
+| `GET /api/devices/{mac}/overlays` | A machine's copy-on-write overlays: image, bytes written, in use |
+| `DELETE /api/devices/{mac}/overlays/{image}` | Reset one: back on the pristine image at the next boot (409 while in use) |
 | `POST /api/disks` | `{"name": "desky.img", "size": <bytes>}`: an empty disk image to fill over NBD |
 | `GET /api/pi/sources` | Directories and disk images in the images directory, with the Pi boot files each has |
 | `GET/PUT /api/settings` | Default image (PCs and Pis), menu poll interval, theme |
