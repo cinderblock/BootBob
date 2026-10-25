@@ -243,3 +243,17 @@ async fn a_size_query_that_aborts_is_cancelled_not_failed() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(matches!(&r.outcomes.lock().unwrap()[0], Outcome::Cancelled(m) if m.contains("aborted")));
 }
+
+#[tokio::test]
+async fn a_client_that_stops_mid_transfer_is_cancelled_not_failed() {
+    let (addr, r) = server(&[("f", pattern(5000))], Config::default()).await;
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    // No options: data comes straight away, as the Pi bootloader gets it.
+    sock.send_to(&Packet::rrq("f", &[]), addr).await.unwrap();
+    let mut buf = [0u8; 1500];
+    let (n, from) = timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await.unwrap().unwrap();
+    assert!(matches!(Packet::parse(&buf[..n]).unwrap(), Packet::Data { block: 1, .. }));
+    sock.send_to(&Packet::error(ErrorCode::NotDefined, "Early terminate"), from).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(matches!(&r.outcomes.lock().unwrap()[0], Outcome::Cancelled(m) if m.contains("Early terminate")));
+}

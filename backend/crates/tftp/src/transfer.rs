@@ -179,11 +179,11 @@ async fn send(sock: &UdpSocket, content: Content, options: &[(String, String)], 
             }
         }
     }
-    send_data(sock, content, &n, config, &mut buf).await.map_err(failed)
+    send_data(sock, content, &n, config, &mut buf).await
 }
 
-async fn send_data(sock: &UdpSocket, content: Content, n: &Negotiated, config: &Config, buf: &mut [u8]) -> Result<u64, String> {
-    let io_err = |e: io::Error| format!("send failed: {e}");
+async fn send_data(sock: &UdpSocket, content: Content, n: &Negotiated, config: &Config, buf: &mut [u8]) -> Result<u64, Outcome> {
+    let io_err = |e: io::Error| Outcome::Failed(format!("send failed: {e}"));
     let mut blocks = Blocks { content, offset: 0 };
     // Blocks base..next have been sent and not yet acknowledged; `window` holds them.
     // Block indices are absolute (from 1); the wire number is the index mod 65536, so a
@@ -195,13 +195,13 @@ async fn send_data(sock: &UdpSocket, content: Content, n: &Negotiated, config: &
     let mut tries = 0;
     loop {
         while !last_sent && (next - base) < n.windowsize as u64 {
-            let block = blocks.next(n.blksize).await.map_err(|e| format!("read failed: {e}"))?;
+            let block = blocks.next(n.blksize).await.map_err(|e| Outcome::Failed(format!("read failed: {e}")))?;
             last_sent = block.len() < n.blksize;
             sock.send(&Packet::data(next as u16, &block)).await.map_err(io_err)?;
             window.push_back(block);
             next += 1;
         }
-        match wait(sock, n.timeout, buf).await? {
+        match wait(sock, n.timeout, buf).await.map_err(Outcome::Failed)? {
             Reply::Ack(num) => {
                 // Find the newest in-flight block with this wire number. Older or duplicate
                 // ACKs match nothing and are ignored, which avoids the Sorcerer's Apprentice
@@ -222,11 +222,13 @@ async fn send_data(sock: &UdpSocket, content: Content, n: &Negotiated, config: &
                     sock.send(&Packet::data((base + i as u64) as u16, block)).await.map_err(io_err)?;
                 }
             }
-            Reply::Error(e) => return Err(e),
+            // The client chose to stop. The Pi bootloader does this routinely: it reads the
+            // first block of a file (or just its size) and ends with "Early terminate".
+            Reply::Error(e) => return Err(Outcome::Cancelled(e)),
             Reply::Timeout => {
                 tries += 1;
                 if tries > config.retries {
-                    return Err(format!("timed out at block {base}"));
+                    return Err(Outcome::Failed(format!("timed out at block {base}")));
                 }
                 for (i, block) in window.iter().enumerate() {
                     sock.send(&Packet::data((base + i as u64) as u16, block)).await.map_err(io_err)?;

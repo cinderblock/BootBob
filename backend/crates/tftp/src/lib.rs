@@ -75,9 +75,10 @@ pub enum Outcome {
         elapsed: Duration,
     },
     Failed(String),
-    /// The client stopped the transfer before any data, in answer to our option
-    /// acknowledgement. UEFI firmware does this routinely: it asks once only to learn the
-    /// file's size (`tsize`), then asks again for real.
+    /// The client stopped the transfer itself, with an error packet. Firmware does this
+    /// routinely: UEFI asks once only to learn the file's size (`tsize`) and stops at our
+    /// option acknowledgement; the Pi bootloader reads the first block of many files and
+    /// ends with "Early terminate". Not a failure.
     Cancelled(String),
 }
 
