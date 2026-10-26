@@ -11,7 +11,8 @@ FROM rust:1-alpine AS server
 RUN apk add --no-cache musl-dev
 WORKDIR /src/backend
 COPY backend/ ./
-COPY ipxe/embed.ipxe /src/ipxe/embed.ipxe
+# The server compiles both iPXE scripts in (the query check, the USB stick's placeholder).
+COPY ipxe/embed.ipxe ipxe/usb.ipxe /src/ipxe/
 RUN cargo build --locked --release -p bootbob && strip target/release/bootbob
 # The NBD client diskless machines run (survives BootBob restarting), for both arches,
 # static. Machines fetch it from /files/tools/. aarch64 links with Rust's own lld.
