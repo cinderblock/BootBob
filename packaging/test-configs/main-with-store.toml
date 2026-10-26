@@ -1,0 +1,24 @@
+# BootBob on steamboat. Paths not set here keep the image's defaults.
+data_dir = "/var/lib/bootbob"
+ipxe_dir = "/usr/share/bootbob/ipxe"
+web_dir = "/usr/share/bootbob/web"
+
+# The LAN address only: steamboat also has public addresses.
+http = "10.255.0.5:8067"
+tftp = "10.255.0.5:69"
+# Network root filesystems (NBD): disk images, each only to the machine assigned it.
+nbd = "10.255.0.5:10809"
+
+# What booting machines are told to fetch from. An IP, not pxe.tsl, so a boot
+# needs neither DNS nor Caddy.
+public_url = "http://10.255.0.5:8067"
+
+# The receive-only DHCP listener, and the interface the network check probes on.
+interface = "eno1"
+
+# Image stores: disk images named "uberfall:<disk>.img" live on uberfall's
+# bootbob-store (servers/uberfall/stacks/bootbob-store). Machines reach it
+# directly for NBD; this server reads their boot files from it.
+[[stores]]
+name = "uberfall"
+url = "http://10.255.0.3:8068"

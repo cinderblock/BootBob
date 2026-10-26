@@ -1,0 +1,12 @@
+# BootBob image store on uberfall. See compose.yml, and "Image stores" in
+# cinderblock/BootBob's README.
+mode = "store"
+store_name = "uberfall"
+# The main BootBob server, which decides which machine may open which disk.
+main_url = "http://10.255.0.5:8067"
+
+data_dir = "/var/lib/bootbob"
+
+# The LAN address only.
+http = "10.255.0.3:8068"
+nbd = "10.255.0.3:10809"

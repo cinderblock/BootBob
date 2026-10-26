@@ -159,4 +159,16 @@ mod tests {
         assert_eq!(c.boot_filename, "bootbob");
         assert!(toml::from_str::<Config>("nope = 1").is_err());
     }
+
+    #[test]
+    fn parses_stores_and_store_mode() {
+        let main: Config = toml::from_str(include_str!("../../../../packaging/test-configs/main-with-store.toml")).unwrap();
+        assert_eq!(main.stores.len(), 1);
+        assert_eq!(main.stores[0].name, "uberfall");
+        assert_eq!(main.stores[0].nbd_host(), "10.255.0.3");
+        let store: Config = toml::from_str(include_str!("../../../../packaging/test-configs/store.toml")).unwrap();
+        assert_eq!(store.mode, Mode::Store);
+        assert_eq!(store.store_name.as_deref(), Some("uberfall"));
+        assert_eq!(store.nbd.unwrap().to_string(), "10.255.0.3:10809");
+    }
 }
