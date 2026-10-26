@@ -5,3 +5,4 @@ backend/** text eol=lf
 web/** text eol=lf
 ipxe/** text eol=lf
 packaging/** text eol=lf
+tools/** text eol=lf
