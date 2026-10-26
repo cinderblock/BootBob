@@ -12,7 +12,9 @@
 //!   the chunk's bit. The base is never written. Deleting the overlay and map resets the
 //!   machine to the base image.
 //!
-//! The map is a file too (`<name>.map`): a 4 KiB header, then one bit per chunk. A write
+//! The map is a file too (`<name>.map`): a 4 KiB header (which also records the base's
+//! size and modification time, so an overlay is never paired with a base it wasn't made
+//! over), then one bit per chunk. A write
 //! lands in the overlay before its bit is set, so a crash in between loses that write but
 //! never shows a half-written chunk. [`Disk::flush`] makes both durable.
 
@@ -153,11 +155,17 @@ pub fn overlay_paths(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
 
 impl Cow {
     /// Opens the overlay `name` in `dir` over `base`, creating it empty if it isn't
-    /// there. An existing overlay made over a base of a different size is refused: the
-    /// base image has been replaced, and the overlay's chunks no longer mean anything.
+    /// there. An existing overlay made over a different base (another size, or the same
+    /// size but modified since: a rebuilt image uploaded under the same name) is refused:
+    /// its chunks no longer mean anything over the new base, and reading them would
+    /// corrupt the machine's filesystem. Reset the overlay to use the new base.
     pub fn open(base: &Path, dir: &Path, name: &str, read_only: bool) -> io::Result<Cow> {
         let base_f = File::open(base)?;
-        let size = base_f.metadata()?.len();
+        let meta = base_f.metadata()?;
+        let size = meta.len();
+        // Nanoseconds since the epoch; 0 when the platform can't say.
+        let mtime =
+            meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos() as u64).unwrap_or(0);
         let chunks = size.div_ceil(CHUNK);
         let map_len = HEADER + chunks.div_ceil(8);
         let (ovl_p, map_p) = overlay_paths(dir, name);
@@ -174,13 +182,14 @@ impl Cow {
             hdr[..8].copy_from_slice(MAGIC);
             hdr[8..12].copy_from_slice(&(CHUNK as u32).to_le_bytes());
             hdr[12..20].copy_from_slice(&size.to_le_bytes());
+            hdr[20..28].copy_from_slice(&mtime.to_le_bytes());
             pwrite(&map, &hdr, 0)?;
             map.set_len(map_len)?;
             overlay.set_len(size)?;
             map.sync_all()?;
         } else {
             let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {what}", map_p.display()));
-            let mut hdr = [0u8; 20];
+            let mut hdr = [0u8; 28];
             if map.metadata()?.len() < HEADER || pread(&map, &mut hdr, 0).is_err() || &hdr[..8] != MAGIC {
                 return Err(bad("not an overlay map"));
             }
@@ -193,6 +202,11 @@ impl Cow {
                     "the overlay was made over a {made_for}-byte base, but the base image is now {size} bytes; \
                      reset the overlay to use the new base"
                 )));
+            }
+            let made_at = u64::from_le_bytes(hdr[20..28].try_into().unwrap());
+            if made_at != 0 && mtime != 0 && made_at != mtime {
+                return Err(bad("the base image has changed since the overlay was made over it; \
+                     reset the overlay to use the new base"));
             }
             if map.metadata()?.len() < map_len {
                 return Err(bad("truncated"));

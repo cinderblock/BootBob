@@ -103,6 +103,16 @@ fn a_replaced_base_is_refused_and_junk_maps_too() {
     Cow::remove(&ov, "pi").unwrap();
     assert!(Cow::open(&b, &ov, "pi", false).is_ok());
 
+    // Same size, rebuilt: refused too (the overlay would be read against the wrong bytes).
+    let d = Cow::open(&b, &ov, "pi", false).unwrap();
+    d.write_at(b"zz", 0).unwrap();
+    drop(d);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&b, vec![7u8; 3 * CHUNK as usize]).unwrap();
+    let e = Cow::open(&b, &ov, "pi", false).unwrap_err();
+    assert!(e.to_string().contains("has changed"), "{e}");
+    Cow::remove(&ov, "pi").unwrap();
+
     std::fs::write(overlay_paths(&ov, "junk").1, b"not a map").unwrap();
     assert!(Cow::open(&b, &ov, "junk", false).unwrap_err().to_string().contains("not an overlay map"));
 }
