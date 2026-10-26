@@ -71,6 +71,19 @@ updates the Pi installs land in the same image, so the next boot uses them.
 A disk image is exported only to the machine assigned the Pi image it belongs to (or the
 one running it now). `POST /api/disks` creates an empty one to fill over NBD.
 
+**Surviving a BootBob restart.** Debian's `nbd-client` sets the device up and exits, so
+when BootBob restarts (an upgrade, a reboot of its host) nothing reconnects: in-flight
+I/O fails and the machine's root filesystem goes read-only. Machines should run
+`bootbob-nbd-client` instead, which BootBob serves at
+`/files/tools/bootbob-nbd-client-{x86_64,aarch64}` with an initramfs hook
+(`/files/tools/bootbob-nbd-client.hook`). It connects the device with a long
+dead-connection timeout, so the kernel holds I/O while BootBob is away, and stays running
+to hand the kernel a new connection the moment BootBob is back: a restart is a pause.
+Install both (the hook as `/etc/initramfs-tools/hooks/bootbob-nbd-client`), run
+`update-initramfs -u`, and add `NBDCLIENT=/usr/sbin/bootbob-nbd-client` to the kernel
+command line; Debian's NBD root script then runs it. `tools/pi-clone-to-nbd.sh` and
+`tools/make-pc-golden.sh` do all of this.
+
 **One image, many Pis.** Mark a Pi image *copy-on-write* and each machine gets its own
 overlay of the disk (`<data_dir>/overlays/<mac>/`): a sparse file holding only the 4 KiB
 chunks that machine has written, and a map of which they are. Reads come from the overlay

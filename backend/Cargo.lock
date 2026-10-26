@@ -149,6 +149,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootbob-nbd-client"
+version = "0.1.0"
+dependencies = [
+ "bootbob-nbd",
+ "libc",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "bootbob-pi"
 version = "0.1.0"
 dependencies = [

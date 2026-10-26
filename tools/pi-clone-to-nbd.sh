@@ -15,6 +15,11 @@
 #      changed during the first);
 #   3. points the copy's fstab and cmdline.txt at the new partitions and the NBD root.
 #
+# Before copying it installs bootbob-nbd-client (fetched from BootBob) and its initramfs
+# hook on the running system, so the copy's initramfs has it and the copy's cmdline.txt
+# names it: then the copy's root survives BootBob restarting (Debian's nbd-client alone
+# doesn't; its root goes read-only).
+#
 # Needs: nbd-client (whose initramfs hook puts NBD root support into the initramfs),
 # rsync, dosfstools, curl. It never touches the SD card or the EEPROM.
 
@@ -31,6 +36,15 @@ for t in nbd-client rsync mkfs.vfat mkfs.ext4 sfdisk curl blkid; do
 	command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }
 done
 [ -e /usr/share/initramfs-tools/scripts/local-top/nbd ] || { echo "nbd-client's initramfs script is missing" >&2; exit 1; }
+
+echo "== Installing bootbob-nbd-client from BootBob"
+arch=$(uname -m)
+curl -fsS -o /usr/sbin/bootbob-nbd-client.new "http://$HOST:8067/files/tools/bootbob-nbd-client-$arch"
+chmod 755 /usr/sbin/bootbob-nbd-client.new
+mv /usr/sbin/bootbob-nbd-client.new /usr/sbin/bootbob-nbd-client
+curl -fsS -o /etc/initramfs-tools/hooks/bootbob-nbd-client "http://$HOST:8067/files/tools/bootbob-nbd-client.hook"
+chmod 755 /etc/initramfs-tools/hooks/bootbob-nbd-client
+update-initramfs -u -k all >/dev/null
 
 echo "== Creating $DISK (${SIZE_GIB} GiB) if it isn't there yet"
 code=$(curl -s -o /tmp/bootbob-disk.out -w '%{http_code}' -X POST -H 'content-type: application/json' \
@@ -86,10 +100,11 @@ sed -i -E \
 	-e "s#^PARTUUID=[0-9a-f-]+-01([[:space:]])#PARTUUID=$PARTUUID_BOOT\1#" \
 	-e "s#^PARTUUID=[0-9a-f-]+-02([[:space:]])#PARTUUID=$PARTUUID_ROOT\1#" \
 	"$MNT/etc/fstab"
-# The root is the NBD disk; ip=dhcp brings the network up in the initramfs.
+# The root is the NBD disk; ip=dhcp brings the network up in the initramfs, and
+# NBDCLIENT makes Debian's NBD root script run bootbob-nbd-client.
 sed -i -E \
 	-e 's#root=[^ ]+#root=/dev/nbd0p2#' \
-	-e "s#\$# nbdroot=$HOST,$DISK,nbd0 ip=dhcp#" \
+	-e "s#\$# nbdroot=$HOST,$DISK,nbd0 ip=dhcp NBDCLIENT=/usr/sbin/bootbob-nbd-client#" \
 	"$MNT/boot/firmware/cmdline.txt"
 grep -q nbdroot "$MNT/boot/firmware/cmdline.txt"
 

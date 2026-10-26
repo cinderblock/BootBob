@@ -1,0 +1,20 @@
+[package]
+name = "bootbob-nbd-client"
+description = "An NBD client for network root filesystems that survives the server restarting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "bootbob-nbd-client"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+bootbob-nbd.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

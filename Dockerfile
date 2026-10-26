@@ -13,6 +13,15 @@ WORKDIR /src/backend
 COPY backend/ ./
 COPY ipxe/embed.ipxe /src/ipxe/embed.ipxe
 RUN cargo build --locked --release -p bootbob && strip target/release/bootbob
+# The NBD client diskless machines run (survives BootBob restarting), for both arches,
+# static. Machines fetch it from /files/tools/. aarch64 links with Rust's own lld.
+RUN rustup target add aarch64-unknown-linux-musl \
+    && cargo build --locked --release -p bootbob-nbd-client \
+    && RUSTFLAGS="-C linker=rust-lld" cargo build --locked --release -p bootbob-nbd-client --target aarch64-unknown-linux-musl \
+    && mkdir -p /out/tools \
+    && cp target/release/bootbob-nbd-client /out/tools/bootbob-nbd-client-x86_64 \
+    && cp target/aarch64-unknown-linux-musl/release/bootbob-nbd-client /out/tools/bootbob-nbd-client-aarch64
+COPY tools/bootbob-nbd-client.hook /out/tools/
 
 FROM oven/bun:1 AS web
 WORKDIR /src/web
@@ -32,6 +41,7 @@ FROM alpine:3
 COPY --from=server /src/backend/target/release/bootbob /usr/bin/bootbob
 COPY --from=web /src/web/dist /usr/share/bootbob/web
 COPY --from=ipxe /out /usr/share/bootbob/ipxe
+COPY --from=server /out/tools /usr/share/bootbob/tools
 COPY packaging/bootbob.toml /etc/bootbob/bootbob.toml
 VOLUME /var/lib/bootbob
 ENV BOOTBOB_CONFIG=/etc/bootbob/bootbob.toml

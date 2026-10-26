@@ -7,6 +7,7 @@
 #   bootbob-pi     Raspberry Pi boot: bootloader request paths, boot files from dirs or disk images
 #   bootbob-cow    disks as files: plain images, and copy-on-write overlays over a shared base
 #   bootbob-nbd    NBD server: disks as network block devices (network roots)
+#   bootbob-nbd-client  the client a diskless machine runs: survives the server restarting
 #   bootbob        the server binary: config, device store, resolver, HTTP API, web UI
 
 [workspace]

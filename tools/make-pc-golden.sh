@@ -3,11 +3,16 @@
 # a FAT boot partition with the kernel and initrd, and an ext4 root filesystem the initrd
 # mounts over NBD. Runs anywhere Docker does; nothing is installed on the host.
 #
-#   tools/make-pc-golden.sh <out.img> [size-GiB] [authorized_keys-file]
+#   BOOTBOB=http://<bootbob>:8067 tools/make-pc-golden.sh <out.img> [size-GiB] [authorized_keys-file]
+#
+# With BOOTBOB set, bootbob-nbd-client and its initramfs hook are fetched from it and
+# baked in, so machines' roots survive BootBob restarting: add
+# NBDCLIENT=/usr/sbin/bootbob-nbd-client to the image's command line.
 #
 # Then upload it (`curl -T out.img http://<bootbob>:8067/api/disks/out.img`) and make a
 # BootBob image with a `disk` section: source out.img, kernel vmlinuz, initrd initrd.img,
-# command line `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp`, copy-on-write on.
+# command line `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp
+# NBDCLIENT=/usr/sbin/bootbob-nbd-client`, copy-on-write on.
 #
 # The image: Debian trixie amd64, linux-image-amd64, nbd-client (its initramfs hook
 # brings NBD root support), openssh-server with the given authorized_keys for root,
@@ -22,11 +27,19 @@ NAME=$(basename "$OUT")
 [ -z "$KEYS" ] || [ -f "$KEYS" ] || { echo "no such keys file: $KEYS" >&2; exit 1; }
 KEYMOUNT=""
 [ -n "$KEYS" ] && KEYMOUNT="-v $(cd "$(dirname "$KEYS")" && pwd)/$(basename "$KEYS"):/keys:ro"
+TOOLS=$(mktemp -d)
+trap 'rm -rf "$TOOLS"' EXIT
+if [ -n "${BOOTBOB:-}" ]; then
+  curl -fsS -o "$TOOLS/bootbob-nbd-client" "$BOOTBOB/files/tools/bootbob-nbd-client-x86_64"
+  curl -fsS -o "$TOOLS/bootbob-nbd-client.hook" "$BOOTBOB/files/tools/bootbob-nbd-client.hook"
+else
+  echo "warning: BOOTBOB unset, so no bootbob-nbd-client: the image's root won't survive BootBob restarting" >&2
+fi
 
 # mmdebstrap needs to mount /proc in the new root and run package scripts in a chroot,
 # hence --privileged. The container is thrown away afterwards.
 # shellcheck disable=SC2086
-docker run --rm --privileged -v "$OUTDIR:/out" $KEYMOUNT -e NAME="$NAME" -e SIZE_GIB="$SIZE_GIB" debian:trixie sh -euc '
+docker run --rm --privileged -v "$OUTDIR:/out" -v "$TOOLS:/tools:ro" $KEYMOUNT -e NAME="$NAME" -e SIZE_GIB="$SIZE_GIB" debian:trixie sh -euc '
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mmdebstrap dosfstools e2fsprogs fdisk mtools >/dev/null
 
@@ -45,6 +58,10 @@ printf "/dev/nbd0p2\t/\text4\tdefaults,noatime\t0\t1\n" > "$ROOT/etc/fstab"
 if [ -f /keys ]; then
   install -d -m 0700 "$ROOT/root/.ssh"
   install -m 0600 /keys "$ROOT/root/.ssh/authorized_keys"
+fi
+if [ -f /tools/bootbob-nbd-client ]; then
+  install -m 0755 /tools/bootbob-nbd-client "$ROOT/usr/sbin/bootbob-nbd-client"
+  install -m 0755 /tools/bootbob-nbd-client.hook "$ROOT/etc/initramfs-tools/hooks/bootbob-nbd-client"
 fi
 # A serial console, so the VM can be watched without a screen.
 mkdir -p "$ROOT/etc/systemd/system/getty.target.wants"

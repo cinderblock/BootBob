@@ -1,0 +1,15 @@
+#!/bin/sh
+# initramfs-tools hook: put bootbob-nbd-client in the initramfs, next to Debian's
+# nbd-client. Debian's NBD root script then runs it instead when the kernel command line
+# has NBDCLIENT=/usr/sbin/bootbob-nbd-client, and the root filesystem survives the BootBob
+# server restarting. Install as /etc/initramfs-tools/hooks/bootbob-nbd-client (mode 755).
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+prereqs)
+	prereqs
+	exit 0
+	;;
+esac
+. /usr/share/initramfs-tools/hook-functions
+copy_exec /usr/sbin/bootbob-nbd-client /usr/sbin

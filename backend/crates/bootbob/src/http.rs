@@ -43,7 +43,8 @@ pub fn router(st: St) -> Router {
         .route("/api/doctor", get(last_report).post(run_doctor))
         .route("/api/stream", get(stream))
         .route("/theme.css", get(theme_css))
-        .nest_service("/files/ipxe", ServeDir::new(&st.config.ipxe_dir));
+        .nest_service("/files/ipxe", ServeDir::new(&st.config.ipxe_dir))
+        .nest_service("/files/tools", ServeDir::new(st.config.tools_dir()));
     r = match st.config.web_dir.clone().filter(|d| d.join("index.html").exists()) {
         Some(dir) => r.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
         None => r.fallback(no_ui),
