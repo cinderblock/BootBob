@@ -2,6 +2,8 @@
 //! holding the USB iPXE builds (`bootbob-usb-efi-*.efi`, see `ipxe/usb.ipxe`), with this
 //! server's URL written over the placeholder in their embedded script. A PC that boots
 //! the stick reaches BootBob even on a network whose DHCP gives no boot options.
+//! They're the full `ipxe.efi`, with iPXE's own NIC drivers, so the stick works even
+//! where the PC's firmware network stack is switched off.
 //!
 //! Made on request (it's tens of milliseconds) so it always carries the server's
 //! current URL and iPXE builds.

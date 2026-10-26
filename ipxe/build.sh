@@ -9,8 +9,10 @@
 #   bootbob-efi-x64.efi     UEFI x86-64 (snponly: uses the firmware's network stack)
 #   bootbob-efi-arm64.efi   UEFI arm64
 #   bootbob-usb-efi-x64.efi, bootbob-usb-efi-arm64.efi
-#                           the same with usb.ipxe embedded, for USB boot sticks: the
-#                           server patches its URL in when it serves a stick
+#                           for USB boot sticks: usb.ipxe embedded (the server patches
+#                           its URL in when it serves a stick), and the full ipxe.efi
+#                           with iPXE's own NIC drivers, since a PC's firmware network
+#                           stack is often switched off
 set -eu
 
 IPXE_REPO=https://github.com/ipxe/ipxe.git
@@ -46,18 +48,16 @@ build bin/undionly.kpxe bin-x86_64-efi/snponly.efi
 cp "$src/src/bin/undionly.kpxe" "$out/bootbob-bios.kpxe"
 cp "$src/src/bin-x86_64-efi/snponly.efi" "$out/bootbob-efi-x64.efi"
 check "$out/bootbob-efi-x64.efi" net
-rm -f "$src/src/bin-x86_64-efi/snponly.efi"
-usb bin-x86_64-efi/snponly.efi
-cp "$src/src/bin-x86_64-efi/snponly.efi" "$out/bootbob-usb-efi-x64.efi"
+usb bin-x86_64-efi/ipxe.efi
+cp "$src/src/bin-x86_64-efi/ipxe.efi" "$out/bootbob-usb-efi-x64.efi"
 check "$out/bootbob-usb-efi-x64.efi" usb
 
 if command -v aarch64-linux-gnu-gcc >/dev/null; then
   build CROSS=aarch64-linux-gnu- bin-arm64-efi/snponly.efi
   cp "$src/src/bin-arm64-efi/snponly.efi" "$out/bootbob-efi-arm64.efi"
   check "$out/bootbob-efi-arm64.efi" net
-  rm -f "$src/src/bin-arm64-efi/snponly.efi"
-  usb CROSS=aarch64-linux-gnu- bin-arm64-efi/snponly.efi
-  cp "$src/src/bin-arm64-efi/snponly.efi" "$out/bootbob-usb-efi-arm64.efi"
+  usb CROSS=aarch64-linux-gnu- bin-arm64-efi/ipxe.efi
+  cp "$src/src/bin-arm64-efi/ipxe.efi" "$out/bootbob-usb-efi-arm64.efi"
   check "$out/bootbob-usb-efi-arm64.efi" usb
 else
   echo "warning: no aarch64-linux-gnu-gcc, so no arm64 build" >&2
