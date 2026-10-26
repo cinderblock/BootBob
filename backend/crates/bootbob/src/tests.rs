@@ -750,3 +750,29 @@ async fn disk_images_can_be_uploaded_and_deleted() {
     assert_eq!(call(&t.st, Method::DELETE, "/api/disks/small.img", None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(call(&t.st, Method::DELETE, "/api/disks/small.img", None).await.0, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn serves_a_usb_stick_that_knows_this_server() {
+    let t = setup();
+    // No USB build yet: a clear 404.
+    assert_eq!(call(&t.st, Method::GET, "/files/usb/bootbob-usb.img", None).await.0, StatusCode::NOT_FOUND);
+    let script = include_str!("../../../../ipxe/usb.ipxe");
+    let ph = script.lines().find_map(|l| l.strip_prefix("set bootbob-url ")).unwrap().trim();
+    std::fs::write(t.st.config.ipxe_dir.join("bootbob-usb-efi-x64.efi"), [b"MZ-x64-".as_slice(), ph.as_bytes(), b"-end"].concat()).unwrap();
+
+    let req = Request::builder().uri("/files/usb/bootbob-usb.img").header("host", "10.255.0.5:8067").body(Body::empty()).unwrap();
+    let res = router(t.st.clone()).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let img = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+    assert_eq!(&img[510..512], &[0x55, 0xaa]);
+    assert_eq!(img[446 + 4], 0xef, "an EFI system partition");
+    let start = u32::from_le_bytes(img[454..458].try_into().unwrap()) as usize * 512;
+    let mut part = std::io::Cursor::new(img[start..].to_vec());
+    let fs = fatfs::FileSystem::new(&mut part, fatfs::FsOptions::new()).unwrap();
+    let mut efi = Vec::new();
+    std::io::Read::read_to_end(&mut fs.root_dir().open_file("EFI/BOOT/BOOTX64.EFI").unwrap(), &mut efi).unwrap();
+    let efi = String::from_utf8_lossy(&efi);
+    assert!(efi.starts_with("MZ-x64-http://10.255.0.5:8067 "), "{efi}");
+    assert!(!efi.contains("PLACEHOLDER"));
+    assert!(fs.root_dir().open_file("EFI/BOOT/BOOTAA64.EFI").is_err(), "no arm64 build here");
+}

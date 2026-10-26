@@ -27,6 +27,9 @@ pub struct Config {
     pub nbd: Option<SocketAddr>,
     /// The interface the DHCP listener watches. `None` turns it off.
     pub interface: Option<String>,
+    /// Advertise BootBob over mDNS (`_bootbob._tcp`) on `interface`, so BenchBob and
+    /// other tools on the LAN find it. Needs `interface`.
+    pub mdns: bool,
     /// The URL machines use to reach BootBob. Unset: taken from each request's `Host`.
     pub public_url: Option<String>,
     /// The single boot file name the network's DHCP server hands out. A TFTP request for
@@ -55,6 +58,7 @@ impl Default for Config {
             tftp: Some("0.0.0.0:69".parse().unwrap()),
             nbd: None,
             interface: None,
+            mdns: true,
             public_url: None,
             boot_filename: "bootbob".into(),
             ipxe_dir: PathBuf::from("ipxe"),

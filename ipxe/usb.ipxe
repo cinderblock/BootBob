@@ -1,0 +1,24 @@
+#!ipxe
+# BootBob's USB-stick script: the iPXE on a boot stick BootBob makes for itself. It knows
+# its server already, so it works on networks whose DHCP gives no boot options.
+#
+# BootBob writes its own URL over the placeholder below when it serves the stick
+# (/files/usb/bootbob-usb.img), padding with spaces; iPXE ignores the trailing spaces.
+# The placeholder must stay exactly as it is: the server looks for it byte for byte.
+# The query matches IDENTITY_QUERY in backend/crates/ipxe/src/lib.rs (a test checks).
+
+set bootbob-url BOOTBOB_URL_PLACEHOLDER_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+:dhcp
+dhcp && goto ask ||
+echo BootBob: no DHCP answer; trying again in 5 seconds
+sleep 5 || shell
+goto dhcp
+
+:ask
+chain --replace --autofree ${bootbob-url}/boot/ipxe?mac=${netX/mac:hexhyp}&uuid=${uuid}&serial=${serial:uristring}&manufacturer=${manufacturer:uristring}&product=${product:uristring}&asset=${asset:uristring}&platform=${platform}&arch=${buildarch}&ip=${netX/ip} || goto unreachable
+
+:unreachable
+echo BootBob: can't reach ${bootbob-url}; trying again in 10 seconds (Ctrl-C for a shell)
+sleep 10 || shell
+goto ask

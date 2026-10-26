@@ -8,6 +8,9 @@
 #   bootbob-bios.kpxe       legacy BIOS (undionly: uses the firmware's PXE stack)
 #   bootbob-efi-x64.efi     UEFI x86-64 (snponly: uses the firmware's network stack)
 #   bootbob-efi-arm64.efi   UEFI arm64
+#   bootbob-usb-efi-x64.efi, bootbob-usb-efi-arm64.efi
+#                           the same with usb.ipxe embedded, for USB boot sticks: the
+#                           server patches its URL in when it serves a stick
 set -eu
 
 IPXE_REPO=https://github.com/ipxe/ipxe.git
@@ -31,14 +34,31 @@ cp "$here"/local/*.h "$src/src/config/local/"
 
 jobs=$(nproc 2>/dev/null || echo 4)
 build() { make -C "$src/src" -j"$jobs" EMBED="$here/embed.ipxe" "$@"; }
+usb() { make -C "$src/src" -j"$jobs" EMBED="$here/usb.ipxe" "$@"; }
+# The USB builds must carry usb.ipxe (the server patches its URL over the placeholder),
+# and the network builds must not.
+check() {
+  if [ "$2" = usb ]; then grep -q BOOTBOB_URL_PLACEHOLDER "$1"; else ! grep -q BOOTBOB_URL_PLACEHOLDER "$1"; fi ||
+    { echo "error: $1 has the wrong embedded script" >&2; exit 1; }
+}
 
 build bin/undionly.kpxe bin-x86_64-efi/snponly.efi
 cp "$src/src/bin/undionly.kpxe" "$out/bootbob-bios.kpxe"
 cp "$src/src/bin-x86_64-efi/snponly.efi" "$out/bootbob-efi-x64.efi"
+check "$out/bootbob-efi-x64.efi" net
+rm -f "$src/src/bin-x86_64-efi/snponly.efi"
+usb bin-x86_64-efi/snponly.efi
+cp "$src/src/bin-x86_64-efi/snponly.efi" "$out/bootbob-usb-efi-x64.efi"
+check "$out/bootbob-usb-efi-x64.efi" usb
 
 if command -v aarch64-linux-gnu-gcc >/dev/null; then
   build CROSS=aarch64-linux-gnu- bin-arm64-efi/snponly.efi
   cp "$src/src/bin-arm64-efi/snponly.efi" "$out/bootbob-efi-arm64.efi"
+  check "$out/bootbob-efi-arm64.efi" net
+  rm -f "$src/src/bin-arm64-efi/snponly.efi"
+  usb CROSS=aarch64-linux-gnu- bin-arm64-efi/snponly.efi
+  cp "$src/src/bin-arm64-efi/snponly.efi" "$out/bootbob-usb-efi-arm64.efi"
+  check "$out/bootbob-usb-efi-arm64.efi" usb
 else
   echo "warning: no aarch64-linux-gnu-gcc, so no arm64 build" >&2
 fi

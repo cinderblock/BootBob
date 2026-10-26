@@ -6,11 +6,13 @@
 mod config;
 mod doctor;
 mod http;
+mod mdns;
 mod model;
 mod nbd;
 mod state;
 mod store;
 mod tftp;
+mod usb;
 
 #[cfg(test)]
 mod tests;
@@ -97,6 +99,15 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => tracing::error!(%addr, "NBD: can't listen, so network roots won't work: {e}"),
         }
     }
+
+    // Kept for as long as BootBob runs: dropping it stops the advertisement.
+    let _mdns = match mdns::advertise(&config) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("mDNS: can't advertise: {e}");
+            None
+        }
+    };
 
     if let Some(iface) = config.interface.clone() {
         let st2 = st.clone();

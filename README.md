@@ -109,6 +109,18 @@ Copy-on-write works the same as for Pis. Disk images can be uploaded with
 `PUT /api/disks/<name>.img` (the body is the image; never overwrites) and deleted with
 `DELETE` once no image uses them.
 
+## A USB boot stick, and finding BootBob on the network
+
+`/files/usb/bootbob-usb.img` is a boot stick for this server: a small disk image with an
+EFI system partition holding BootBob's iPXE (x86-64 and arm64), with the server's URL
+written into it. A UEFI PC booted from it reaches BootBob even on a network whose DHCP
+gives no boot options. Write it to any USB stick (`dd`, Raspberry Pi Imager, BenchBob).
+
+BootBob also announces itself over mDNS as `_bootbob._tcp` on the LAN interface (the
+`interface` in the config; `mdns = false` turns it off), with TXT records `url`,
+`version` and `caps`. BenchBob uses that to offer boot sticks and Pi netboot EEPROM cards
+for the BootBob on its network.
+
 ## Running it
 
 ```sh
@@ -171,6 +183,8 @@ for throwaway VMs.
 | `DELETE /api/devices/{mac}/overlays/{image}` | Reset one: back on the pristine image at the next boot (409 while in use) |
 | `PUT /api/disks/{name}.img` | Upload a disk image (the request body) |
 | `DELETE /api/disks/{name}.img` | Delete one no image uses, with its overlays |
+| `GET /files/usb/bootbob-usb.img` | A USB boot stick that finds this server |
+| `GET /files/tools/…` | `bootbob-nbd-client-{x86_64,aarch64}` and its initramfs hook |
 | `GET /boot/disk/{image}/{file}?mac=…` | A file from a PC disk image's boot partition (what iPXE fetches) |
 | `POST /api/disks` | `{"name": "desky.img", "size": <bytes>}`: an empty disk image to fill over NBD |
 | `GET /api/pi/sources` | Directories and disk images in the images directory, with the Pi boot files each has |

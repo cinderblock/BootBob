@@ -273,6 +273,8 @@ mod tests {
     fn the_embedded_script_sends_the_same_identity() {
         let embed = include_str!("../../../../ipxe/embed.ipxe");
         assert!(embed.contains(&format!("/boot/ipxe?{IDENTITY_QUERY} ")), "ipxe/embed.ipxe's query drifted from IDENTITY_QUERY");
+        let usb = include_str!("../../../../ipxe/usb.ipxe");
+        assert!(usb.contains(&format!("/boot/ipxe?{IDENTITY_QUERY} ")), "ipxe/usb.ipxe's query drifted from IDENTITY_QUERY");
     }
 
     #[test]

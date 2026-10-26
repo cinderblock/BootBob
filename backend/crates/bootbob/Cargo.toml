@@ -10,6 +10,8 @@ publish.workspace = true
 [dependencies]
 bootbob-dhcp.workspace = true
 bootbob-cow.workspace = true
+fatfs.workspace = true
+mdns-sd.workspace = true
 bootbob-ipxe.workspace = true
 bootbob-nbd.workspace = true
 bootbob-pi.workspace = true
@@ -31,6 +33,5 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-fatfs.workspace = true
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

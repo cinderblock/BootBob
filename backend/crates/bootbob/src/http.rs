@@ -27,6 +27,7 @@ pub fn router(st: St) -> Router {
         .route("/boot/ipxe", get(boot_ipxe))
         .route("/boot/ipxe/chose", get(boot_chose))
         .route("/boot/disk/{image}/{*path}", get(disk_file))
+        .route("/files/usb/bootbob-usb.img", get(usb_stick))
         .route("/api/status", get(status))
         .route("/api/devices", get(list_devices))
         .route("/api/devices/{mac}", get(get_device).patch(patch_device).delete(delete_device))
@@ -324,6 +325,21 @@ async fn disk_file(Ax(st): Ax<St>, Path((image, path)): Path<(String, String)>, 
         Ok(Ok(Some(bytes))) => ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
         Ok(Ok(None)) => not_found("file in the boot partition").into_response(),
         Ok(Err(e)) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("can't read {image}: {e}")).into_response(),
+        Err(e) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// A USB boot stick that finds this server (see `usb.rs`).
+async fn usb_stick(Ax(st): Ax<St>, headers: HeaderMap) -> Response {
+    let url = base_url(&st, &headers);
+    let dir = st.config.ipxe_dir.clone();
+    match tokio::task::spawn_blocking(move || crate::usb::stick(&dir, &url)).await {
+        Ok(Ok(img)) => (
+            [(header::CONTENT_TYPE, "application/octet-stream"), (header::CONTENT_DISPOSITION, "attachment; filename=\"bootbob-usb.img\"")],
+            img,
+        )
+            .into_response(),
+        Ok(Err(e)) => ApiError(StatusCode::NOT_FOUND, e).into_response(),
         Err(e) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
