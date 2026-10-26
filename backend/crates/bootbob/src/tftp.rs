@@ -130,20 +130,19 @@ impl Tftp {
             tracing::info!(%mac, image, "Pi boot started");
         }
 
-        let source = match bootbob_pi::resolve_source(&self.st.config.images_dir(), &pi.source) {
-            Ok(s) => s,
-            Err(e) => {
-                self.note(Some(mac), ip, &path, None, |d| mark(d, Some(&image)));
-                if new {
-                    self.st.event(Some(mac), "error", format!("Can't boot {image}: {e}"));
-                }
-                return Resolution::NotFound;
+        if let Err(e) = crate::stores::locate(&self.st.config, &pi.source) {
+            self.note(Some(mac), ip, &path, None, |d| mark(d, Some(&image)));
+            if new {
+                self.st.event(Some(mac), "error", format!("Can't boot {image}: {e}"));
             }
-        };
-        let server = match req.local.ip() {
+            return Resolution::NotFound;
+        }
+        let here = match req.local.ip() {
             a if !a.is_unspecified() => a.to_string(),
             _ => self.st.config.tftp.map(|t| t.ip().to_string()).unwrap_or_default(),
         };
+        // {server}: where its disk is served (a store's own address for a store image).
+        let server = crate::stores::nbd_host(&self.st.config, &pi.source, here);
         let ip_s = ip.map(|i| i.to_string()).unwrap_or_default();
         let fill = |t: &str| fill(t, serial.as_deref().unwrap_or(""), mac, &ip_s, &server);
 
@@ -151,16 +150,11 @@ impl Tftp {
         let content = if lower == "cmdline.txt" && !pi.cmdline.trim().is_empty() {
             Ok(Some(Content::Memory(Bytes::from(format!("{}\n", fill(pi.cmdline.trim()))))))
         } else {
-            let (src, f) = (source.clone(), file.to_string());
             // A copy-on-write image: the machine's own view of it, once it has one (a
             // kernel it installed lives in its overlay). Until then, the image itself.
-            let cow = pi.cow.then(|| (crate::nbd::overlay_dir(&self.st, mac), crate::nbd::overlay_name(&pi.source).to_string()));
-            let look = move || match cow {
-                Some((dir, name)) if bootbob_cow::Cow::exists(&dir, &name) => {
-                    bootbob_pi::find_on(&bootbob_cow::Cow::open(&src, &dir, &name, true)?, &f)
-                }
-                _ => bootbob_pi::find(&src, &f),
-            };
+            // A store image: read from the store.
+            let (st, src, f, cow) = (self.st.clone(), pi.source.clone(), file.to_string(), pi.cow);
+            let look = move || crate::stores::boot_file(&st, &src, cow, Some(mac), &f);
             match tokio::task::spawn_blocking(look).await {
                 Ok(Ok(found)) => {
                     let found = if lower == "config.txt" && !pi.config.trim().is_empty() {

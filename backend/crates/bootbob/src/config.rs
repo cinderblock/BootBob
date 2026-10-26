@@ -6,7 +6,14 @@
 //! tftp = "10.255.0.5:69"
 //! interface = "eno1"            # the DHCP listener; leave out to turn it off
 //! public_url = "http://10.255.0.5:8067"
+//!
+//! [[stores]]                    # image stores on other hosts (see stores.rs)
+//! name = "uberfall"
+//! url = "http://10.255.0.3:8068"
 //! ```
+//!
+//! An image store runs the same binary with `mode = "store"` and `main_url` pointing at
+//! the main server; it serves disk images (NBD and boot files) and nothing else.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -48,6 +55,48 @@ pub struct Config {
     pub tools_dir: Option<PathBuf>,
     /// The firmware assumed when a machine's can't be worked out.
     pub default_firmware: String,
+    /// `server` (the default): the whole of BootBob. `store`: an image store on another
+    /// host, serving disk images (NBD, boot files, uploads) for the main server at
+    /// `main_url`, which decides which machine may open which disk.
+    pub mode: Mode,
+    /// A store's main server, e.g. `http://10.255.0.5:8067`. Required in store mode.
+    pub main_url: Option<String>,
+    /// A store's name, as the main server's `stores` call it. Required in store mode.
+    pub store_name: Option<String>,
+    /// The main server's image stores. An image's source `<store>:<disk>.img` lives there.
+    pub stores: Vec<StoreConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Server,
+    Store,
+}
+
+/// An image store, as the main server knows it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreConfig {
+    /// What image sources call it: `uberfall` in `uberfall:golden.img`.
+    pub name: String,
+    /// Its HTTP API, e.g. `http://10.255.0.3:8068`.
+    pub url: String,
+    /// Where machines reach its NBD server. Unset: the host in `url`.
+    #[serde(default)]
+    pub nbd_host: Option<String>,
+}
+
+impl StoreConfig {
+    /// The host machines connect to for NBD.
+    pub fn nbd_host(&self) -> String {
+        self.nbd_host.clone().unwrap_or_else(|| {
+            let h = self.url.split("://").nth(1).unwrap_or(&self.url);
+            let h = h.split('/').next().unwrap_or(h);
+            h.rsplit_once(':').map(|(h, _)| h).unwrap_or(h).to_string()
+        })
+    }
 }
 
 impl Default for Config {
@@ -66,6 +115,10 @@ impl Default for Config {
             images_dir: None,
             tools_dir: None,
             default_firmware: "efi-x64".into(),
+            mode: Mode::Server,
+            main_url: None,
+            store_name: None,
+            stores: Vec::new(),
         }
     }
 }

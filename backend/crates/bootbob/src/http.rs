@@ -37,6 +37,7 @@ pub fn router(st: St) -> Router {
         .route("/api/images", get(list_images))
         .route("/api/images/{id}", put(put_image).delete(delete_image))
         .route("/api/pi/sources", get(pi_sources))
+        .route("/api/store/allow", get(store_allow))
         .route("/api/disks", axum::routing::post(create_disk))
         .route("/api/disks/{name}", put(upload_disk).delete(delete_disk))
         .route("/api/settings", get(get_settings).put(put_settings))
@@ -280,8 +281,12 @@ pub(crate) fn pc_action(st: &State, img: &Image, mac: Mac, base: &str) -> Option
     let dashed = format!("{:02x}-{:02x}-{:02x}-{:02x}-{:02x}-{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
     let url = |f: &str| format!("{base}/boot/disk/{}/{}?mac={dashed}", img.id, f.trim_start_matches('/'));
     let ip = st.device(mac).and_then(|d| d.ip).unwrap_or_default();
-    let cmdline =
-        d.cmdline.replace("{server}", &nbd_server(st, base)).replace("{disk}", &d.source).replace("{mac}", &dashed).replace("{ip}", &ip);
+    let cmdline = d
+        .cmdline
+        .replace("{server}", &crate::stores::nbd_host(&st.config, &d.source, nbd_server(st, base)))
+        .replace("{disk}", &d.source)
+        .replace("{mac}", &dashed)
+        .replace("{ip}", &ip);
     let initrds = if d.initrd.trim().is_empty() { vec![] } else { vec![url(d.initrd.trim())] };
     Some(bootbob_ipxe::Action::Kernel { kernel: url(d.kernel.trim()), initrds, cmdline })
 }
@@ -298,23 +303,10 @@ async fn disk_file(Ax(st): Ax<St>, Path((image, path)): Path<(String, String)>, 
     let Some(d) = st.image(&image).and_then(|i| i.disk) else {
         return not_found("disk image").into_response();
     };
-    let Ok(src) = bootbob_pi::resolve_source(&st.config.images_dir(), &d.source) else {
-        return not_found("disk image").into_response();
-    };
     let Some(path) = bootbob_tftp::clean_path(&path) else { return bad("bad path").into_response() };
-    let cow = q
-        .mac
-        .as_deref()
-        .and_then(|m| m.parse::<Mac>().ok())
-        .filter(|_| d.cow)
-        .map(|mac| (crate::nbd::overlay_dir(&st, mac), crate::nbd::overlay_name(&d.source).to_string()));
+    let mac = q.mac.as_deref().and_then(|m| m.parse::<Mac>().ok());
     let look = move || -> std::io::Result<Option<Vec<u8>>> {
-        let found = match cow {
-            Some((dir, name)) if bootbob_cow::Cow::exists(&dir, &name) => {
-                bootbob_pi::find_on(&bootbob_cow::Cow::open(&src, &dir, &name, true)?, &path)?
-            }
-            _ => bootbob_pi::find(&src, &path)?,
-        };
+        let found = crate::stores::boot_file(&st, &d.source, d.cow, mac, &path)?;
         Ok(match found {
             Some(bootbob_pi::Found::Bytes(b)) => Some(b),
             Some(bootbob_pi::Found::Path { path, .. }) => Some(std::fs::read(path)?),
@@ -541,16 +533,141 @@ async fn list_overlays(Ax(st): Ax<St>, Path(mac): Path<String>) -> Result<Json<V
 
 async fn reset_overlay(Ax(st): Ax<St>, Path((mac, source)): Path<(String, String)>) -> Result<StatusCode, ApiError> {
     let mac = parse_mac(&mac)?;
-    match crate::nbd::reset_overlay(&st, mac, &source) {
+    let r = tokio::task::spawn_blocking(move || crate::nbd::reset_overlay(&st, mac, &source))
+        .await
+        .unwrap_or_else(|e| Err((500, e.to_string())));
+    match r {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err(not_found("overlay")),
         Err((code, msg)) => Err(ApiError(StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), msg)),
     }
 }
 
+/// The images directory's sources, then each store's disk images (`<store>:<disk>`).
 async fn pi_sources(Ax(st): Ax<St>) -> Json<Vec<bootbob_pi::SourceInfo>> {
+    let config = st.config.clone();
+    Json(
+        tokio::task::spawn_blocking(move || {
+            let mut out = bootbob_pi::scan(&config.images_dir());
+            if config.mode == crate::config::Mode::Server {
+                for s in &config.stores {
+                    out.extend(crate::stores::sources(s));
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default(),
+    )
+}
+
+#[derive(Deserialize)]
+struct AllowQuery {
+    store: String,
+    ip: std::net::Ipv4Addr,
+    export: String,
+}
+
+/// A store asking whether a machine may open one of its disks (see stores.rs).
+async fn store_allow(Ax(st): Ax<St>, Query(q): Query<AllowQuery>) -> Result<Json<crate::stores::Allow>, ApiError> {
+    if !st.config.stores.iter().any(|s| s.name == q.store) {
+        return Err(ApiError(StatusCode::FORBIDDEN, format!("no store {:?}", q.store)));
+    }
+    crate::nbd::allow_for_store(&st, &q.store, q.ip, &q.export).map(Json).map_err(|e| ApiError(StatusCode::FORBIDDEN, e))
+}
+
+// ---- Store mode ----
+
+/// An image store's API: its disk images (list, upload, create, delete), their boot
+/// files, and machines' overlays. The main server and people use it; machines use its
+/// NBD server.
+pub fn store_router(st: St) -> Router {
+    Router::new()
+        .route("/api/status", get(store_status))
+        .route("/api/pi/sources", get(local_sources))
+        .route("/api/disks", axum::routing::post(create_disk))
+        .route("/api/disks/{name}", put(upload_disk).delete(delete_disk))
+        .route("/store/boot/{disk}/{*path}", get(store_boot_file))
+        .route("/api/overlays/{mac}", get(store_overlays))
+        .route("/api/overlays/{mac}/{disk}", axum::routing::delete(store_reset_overlay))
+        .with_state(st)
+}
+
+#[derive(Serialize)]
+struct StoreStatus {
+    mode: &'static str,
+    version: &'static str,
+    name: Option<String>,
+    main_url: Option<String>,
+    nbd: Option<String>,
+    disks: usize,
+}
+
+async fn store_status(Ax(st): Ax<St>) -> Json<StoreStatus> {
+    let dir = st.config.images_dir();
+    let disks = tokio::task::spawn_blocking(move || bootbob_pi::scan(&dir).len()).await.unwrap_or(0);
+    Json(StoreStatus {
+        mode: "store",
+        version: env!("CARGO_PKG_VERSION"),
+        name: st.config.store_name.clone(),
+        main_url: st.config.main_url.clone(),
+        nbd: st.config.nbd.map(|a| a.to_string()),
+        disks,
+    })
+}
+
+async fn local_sources(Ax(st): Ax<St>) -> Json<Vec<bootbob_pi::SourceInfo>> {
     let dir = st.config.images_dir();
     Json(tokio::task::spawn_blocking(move || bootbob_pi::scan(&dir)).await.unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+struct StoreBootQuery {
+    mac: Option<String>,
+    cow: Option<String>,
+}
+
+/// A file from one of this store's disk images' boot partitions, for the main server.
+async fn store_boot_file(Ax(st): Ax<St>, Path((disk, path)): Path<(String, String)>, Query(q): Query<StoreBootQuery>) -> Response {
+    if crate::nbd::check_disk_name(&disk).is_err() {
+        return bad("bad disk name").into_response();
+    }
+    let Ok(src) = bootbob_pi::resolve_source(&st.config.images_dir(), &disk) else {
+        return not_found("disk image").into_response();
+    };
+    let Some(path) = bootbob_tftp::clean_path(&path) else { return bad("bad path").into_response() };
+    let mac = q.mac.as_deref().and_then(|m| m.parse::<Mac>().ok());
+    let cow = q.cow.as_deref() == Some("1");
+    let look = move || -> std::io::Result<Option<Vec<u8>>> {
+        Ok(match crate::stores::local_boot_file(&st, &src, &disk, cow, mac, &path)? {
+            Some(bootbob_pi::Found::Bytes(b)) => Some(b),
+            Some(bootbob_pi::Found::Path { path, .. }) => Some(std::fs::read(path)?),
+            None => None,
+        })
+    };
+    match tokio::task::spawn_blocking(look).await {
+        Ok(Ok(Some(bytes))) => ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
+        Ok(Ok(None)) => not_found("file in the boot partition").into_response(),
+        Ok(Err(e)) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn store_overlays(Ax(st): Ax<St>, Path(mac): Path<String>) -> Result<Json<Vec<crate::nbd::OverlayInfo>>, ApiError> {
+    let mac = parse_mac(&mac)?;
+    Ok(Json(tokio::task::spawn_blocking(move || crate::nbd::local_overlays(&st, mac)).await.unwrap_or_default()))
+}
+
+async fn store_reset_overlay(Ax(st): Ax<St>, Path((mac, disk)): Path<(String, String)>) -> Result<StatusCode, ApiError> {
+    let mac = parse_mac(&mac)?;
+    if disk.contains(':') {
+        return Err(bad("a store's own disks have no store prefix"));
+    }
+    match crate::nbd::reset_overlay(&st, mac, &disk) {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(not_found("overlay")),
+        Err((code, msg)) => Err(ApiError(StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), msg)),
+    }
 }
 
 #[derive(Deserialize)]

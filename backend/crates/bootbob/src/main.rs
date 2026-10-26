@@ -11,6 +11,7 @@ mod model;
 mod nbd;
 mod state;
 mod store;
+mod stores;
 mod tftp;
 mod usb;
 
@@ -46,6 +47,27 @@ fn config_path() -> anyhow::Result<Option<PathBuf>> {
     Ok(path)
 }
 
+/// An image store: NBD for its disk images (each opened only when the main server says
+/// so) and its small HTTP API. No TFTP, DHCP listener, mDNS or web UI.
+async fn store(config: Config, st: Arc<State>) -> anyhow::Result<()> {
+    anyhow::ensure!(config.main_url.is_some(), "store mode needs main_url (the main BootBob server)");
+    anyhow::ensure!(config.store_name.is_some(), "store mode needs store_name (what the main server's stores call it)");
+    let addr = config.nbd.context("store mode needs nbd (the address machines reach its disks on)")?;
+    let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("NBD: can't listen on {addr}"))?;
+    tracing::info!(%addr, main = config.main_url.as_deref().unwrap_or(""), "store: NBD listening");
+    let exports = Arc::new(nbd::StoreExports { st: st.clone() });
+    let live = st.nbd_live.clone();
+    tokio::spawn(async move {
+        if let Err(e) = bootbob_nbd::serve_with(l, exports, live).await {
+            tracing::error!("NBD stopped: {e}");
+        }
+    });
+    let listener = tokio::net::TcpListener::bind(config.http).await.with_context(|| format!("HTTP: can't listen on {}", config.http))?;
+    tracing::info!(addr = %config.http, "store: HTTP listening");
+    axum::serve(listener, http::store_router(st)).with_graceful_shutdown(shutdown_signal()).await?;
+    Ok(())
+}
+
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
@@ -65,7 +87,11 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))).init();
     let config = Config::load(config_path()?.as_deref())?;
     let st = Arc::new(State::open(config.clone()).context("opening the database")?);
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %config.data_dir.display(), "BootBob starting");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %config.data_dir.display(), mode = ?config.mode, "BootBob starting");
+
+    if config.mode == config::Mode::Store {
+        return store(config, st).await;
+    }
 
     if let Some(addr) = config.tftp {
         match bootbob_tftp::bind(addr.ip(), addr.port()).await {

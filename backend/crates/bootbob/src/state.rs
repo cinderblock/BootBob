@@ -202,7 +202,7 @@ impl State {
             return Err("a PC boots either the iPXE action or the disk image, not both".into());
         }
         if let Some(d) = &image.disk {
-            bootbob_pi::resolve_source(&self.config.images_dir(), &d.source)?;
+            crate::stores::locate(&self.config, &d.source)?;
             if !d.source.ends_with(".img") {
                 return Err("a PC disk boot needs a disk image (.img)".into());
             }
@@ -211,7 +211,7 @@ impl State {
             }
         }
         if let Some(pi) = &image.pi {
-            bootbob_pi::resolve_source(&self.config.images_dir(), &pi.source)?;
+            crate::stores::locate(&self.config, &pi.source)?;
             if pi.cow && !pi.source.ends_with(".img") {
                 return Err("copy-on-write needs a disk image (.img) source, not a directory".into());
             }

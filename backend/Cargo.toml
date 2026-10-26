@@ -37,6 +37,8 @@ fatfs = { version = "0.3", default-features = false, features = ["std", "alloc"]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 libc = "0.2"
 mdns-sd = { version = "0.21", default-features = false }
+# The main server and its image stores talk plain HTTP on the LAN: no TLS stack.
+ureq = { version = "3", default-features = false }
 redb = "4"
 serde = { version = "1", features = ["derive"] }
 # TCP keepalive timings for NBD connections (std only sets keepalive on or off).

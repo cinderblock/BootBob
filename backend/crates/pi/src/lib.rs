@@ -105,7 +105,7 @@ pub struct SourceInfo {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceKind {
     Directory,
@@ -114,7 +114,7 @@ pub enum SourceKind {
 
 /// Files that mark a Pi boot tree: firmware for the Pi 4 and earlier, the configs, and
 /// the kernels for the Pi 4 (64- and 32-bit) and Pi 5.
-const BOOT_FILES: &[&str] = &["start4.elf", "start.elf", "config.txt", "cmdline.txt", "kernel8.img", "kernel7l.img", "kernel_2712.img"];
+pub const BOOT_FILES: &[&str] = &["start4.elf", "start.elf", "config.txt", "cmdline.txt", "kernel8.img", "kernel7l.img", "kernel_2712.img"];
 
 /// Describes one source.
 pub fn describe(images_dir: &Path, rel: &str) -> SourceInfo {

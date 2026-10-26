@@ -18,7 +18,7 @@ use std::sync::Arc;
 use bootbob_cow::Cow;
 use bootbob_dhcp::Mac;
 use bootbob_nbd::{Export, Exports, Stats};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::state::State;
 
@@ -115,7 +115,7 @@ impl Exports for Nbd {
 }
 
 /// A machine's copy-on-write overlay, for the UI.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayInfo {
     /// The disk image it is over, e.g. `pios.img`.
     pub source: String,
@@ -125,8 +125,19 @@ pub struct OverlayInfo {
     pub in_use: bool,
 }
 
-/// The overlays a machine has.
+/// The overlays a machine has, here and (on the main server) on every store. Blocking.
 pub fn overlays(st: &State, mac: Mac) -> Vec<OverlayInfo> {
+    let mut out = local_overlays(st, mac);
+    if st.config.mode == crate::config::Mode::Server {
+        for s in &st.config.stores {
+            out.extend(crate::stores::overlays(s, mac));
+        }
+    }
+    out
+}
+
+/// The overlays a machine has on this host.
+pub fn local_overlays(st: &State, mac: Mac) -> Vec<OverlayInfo> {
     let dir = overlay_dir(st, mac);
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut out: Vec<OverlayInfo> = entries
@@ -148,6 +159,14 @@ pub fn overlays(st: &State, mac: Mac) -> Vec<OverlayInfo> {
 /// Deletes a machine's overlay of `source`: back on the pristine image at its next boot.
 /// Refused while the machine is connected to it. `Ok(true)` when something was removed.
 pub fn reset_overlay(st: &State, mac: Mac, source: &str) -> Result<bool, (u16, String)> {
+    if let Some((store, disk)) = source.split_once(':') {
+        let s = st.config.stores.iter().find(|s| s.name == store).ok_or((404, format!("no store {store:?}")))?;
+        let r = crate::stores::reset_overlay(s, mac, disk)?;
+        if r {
+            st.event(Some(mac), "disk", format!("Overlay of {source} reset: back on the image at the next boot"));
+        }
+        return Ok(r);
+    }
     let dir = overlay_dir(st, mac);
     let name = overlay_name(source);
     if !Cow::exists(&dir, name) {
@@ -202,6 +221,60 @@ pub fn delete_disk(st: &State, name: &str) -> Result<(), (u16, String)> {
     std::fs::remove_file(&path).map_err(|e| (500, format!("can't delete {name}: {e}")))?;
     st.event(None, "disk", format!("Deleted disk {name} and its overlays"));
     Ok(())
+}
+
+/// The main server's answer to store `store` asking whether `ip` may open its disk
+/// `export`: allowed if `<store>:<export>` is the disk of an image the machine is
+/// assigned or running.
+pub fn allow_for_store(st: &Arc<State>, store: &str, ip: std::net::Ipv4Addr, export: &str) -> Result<crate::stores::Allow, String> {
+    let nbd = Nbd { st: st.clone() };
+    let (mac, disks) = nbd.allowed(SocketAddr::from((ip, 0)))?;
+    let want = format!("{store}:{export}");
+    let d = disks.iter().find(|d| d.source == want).ok_or_else(|| format!("{want} isn't the disk of an image assigned to this machine"))?;
+    Ok(crate::stores::Allow { mac: crate::stores::dashed(mac), cow: d.cow })
+}
+
+/// An image store's exports: its own disk images, each opened only when the main server
+/// says this machine may (and through its overlay when the image is copy-on-write).
+pub struct StoreExports {
+    pub st: Arc<State>,
+}
+
+impl Exports for StoreExports {
+    fn open(&self, name: &str, peer: SocketAddr) -> Result<Export, String> {
+        let path = bootbob_pi::resolve_source(&self.st.config.images_dir(), name).map_err(|_| format!("no export {name:?}"))?;
+        if !path.is_file() {
+            return Err(format!("no export {name:?}"));
+        }
+        let ip = match peer.ip() {
+            IpAddr::V4(a) => a,
+            IpAddr::V6(a) => a.to_ipv4_mapped().ok_or("IPv6 clients aren't supported")?,
+        };
+        // The main server answers over HTTP; don't stall the runtime's other tasks.
+        let config = self.st.config.clone();
+        let allow = tokio::task::block_in_place(|| crate::stores::ask_main(&config, ip, name))?;
+        let mac: Mac = allow.mac.parse().map_err(|_| format!("the main server named machine {:?}", allow.mac))?;
+        let overlay = allow.cow.then(|| (overlay_dir(&self.st, mac), overlay_name(name).to_string()));
+        Ok(Export { name: name.to_string(), path, read_only: false, overlay })
+    }
+
+    fn list(&self, _peer: SocketAddr) -> Vec<String> {
+        // Listing would need the main server's answer for every disk; nothing needs it.
+        Vec::new()
+    }
+
+    fn connected(&self, export: &Export, peer: SocketAddr) {
+        self.st.event(None, "nbd", format!("{} connected to disk {} (NBD)", peer.ip(), export.name));
+    }
+
+    fn disconnected(&self, export: &Export, peer: SocketAddr, stats: Stats, why: &str) {
+        let mb = |b: u64| b.div_ceil(1 << 20);
+        self.st.event(
+            None,
+            "nbd",
+            format!("{} on disk {} (NBD) {why}: read {} MB, wrote {} MB", peer.ip(), export.name, mb(stats.read), mb(stats.written)),
+        );
+    }
 }
 
 /// Creates an empty (sparse) disk image in the images directory, for a machine to

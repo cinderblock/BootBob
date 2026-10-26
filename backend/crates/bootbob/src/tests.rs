@@ -776,3 +776,93 @@ async fn serves_a_usb_stick_that_knows_this_server() {
     assert!(!efi.contains("PLACEHOLDER"));
     assert!(fs.root_dir().open_file("EFI/BOOT/BOOTAA64.EFI").is_err(), "no arm64 build here");
 }
+
+// ---- Image stores ----
+
+/// A bare FAT "disk image" with a kernel and initrd, written to `dir/name`.
+fn fat_disk_at(dir: &std::path::Path, name: &str) {
+    let mut disk = std::io::Cursor::new(vec![0u8; 4 << 20]);
+    fatfs::format_volume(&mut disk, fatfs::FormatVolumeOptions::new()).unwrap();
+    {
+        let fs = fatfs::FileSystem::new(&mut disk, fatfs::FsOptions::new()).unwrap();
+        std::io::Write::write_all(&mut fs.root_dir().create_file("vmlinuz").unwrap(), b"STORE-KERNEL").unwrap();
+        std::io::Write::write_all(&mut fs.root_dir().create_file("initrd.img").unwrap(), b"STORE-INITRD").unwrap();
+    }
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join(name), disk.into_inner()).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_serves_disks_the_main_server_decides_about() {
+    use bootbob_cow::Disk;
+    use bootbob_nbd::Exports;
+    let main_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let store_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (main_url, store_url) = (format!("http://{}", main_l.local_addr().unwrap()), format!("http://{}", store_l.local_addr().unwrap()));
+
+    let dirs = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let ipxe = dirs.0.path().join("ipxe");
+    std::fs::create_dir_all(&ipxe).unwrap();
+    let main = Arc::new(
+        State::open(Config {
+            data_dir: dirs.0.path().join("data"),
+            ipxe_dir: ipxe,
+            stores: vec![crate::config::StoreConfig { name: "s1".into(), url: store_url.clone(), nbd_host: Some("10.255.0.3".into()) }],
+            ..Config::default()
+        })
+        .unwrap(),
+    );
+    let store = Arc::new(
+        State::open(Config {
+            data_dir: dirs.1.path().join("data"),
+            mode: crate::config::Mode::Store,
+            main_url: Some(main_url),
+            store_name: Some("s1".into()),
+            ..Config::default()
+        })
+        .unwrap(),
+    );
+    fat_disk_at(&store.config.images_dir(), "golden.img");
+    tokio::spawn(axum::serve(main_l, router(main.clone())).into_future());
+    tokio::spawn(axum::serve(store_l, crate::http::store_router(store.clone())).into_future());
+
+    // An image on the store.
+    let img = json!({"title": "Golden (on s1)", "disk": {"source": "s1:golden.img", "initrd": "initrd.img",
+        "cmdline": "root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp", "cow": true}});
+    let (s, body) = call(&main, Method::PUT, "/api/images/golden", Some(img)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let (s, _) = call(&main, Method::PUT, "/api/images/bad", Some(json!({"title": "x", "disk": {"source": "nope:golden.img"}}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "an unknown store");
+
+    // The main server lists the store's disks, and fetches boot files from it.
+    let v = json(&main, "/api/pi/sources").await;
+    assert!(v.as_array().unwrap().iter().any(|s| s["path"] == "s1:golden.img"), "{v}");
+    assert_eq!(get(&main, "/boot/disk/golden/vmlinuz").await, "STORE-KERNEL");
+
+    // A PC assigned it boots with the store as its NBD server.
+    get(&main, &ident("")).await;
+    call(&main, Method::PUT, &format!("/api/devices/{MAC}/assignment"), Some(json!({"image": "golden"}))).await;
+    let script = get(&main, &ident("&poll=1")).await;
+    assert!(script.contains("nbdroot=10.255.0.3,s1:golden.img,nbd0"), "{script}");
+
+    // The store asks the main server; only the assigned machine gets the disk.
+    let mac: Mac = MAC.parse().unwrap();
+    main.learn_address(Ipv4Addr::new(10, 255, 7, 9), mac);
+    let exports = crate::nbd::StoreExports { st: store.clone() };
+    let ex = exports.open("golden.img", SocketAddr::from(([10, 255, 7, 9], 40000))).unwrap();
+    let (dir, name) = ex.overlay.clone().expect("copy-on-write, so through an overlay");
+    assert!(dir.starts_with(store.config.overlays_dir()));
+    let refused = exports.open("golden.img", SocketAddr::from(([10, 255, 7, 99], 40000))).unwrap_err();
+    assert!(refused.contains("doesn't know") || refused.contains("isn't the disk"), "{refused}");
+
+    // The machine writes; its overlay shows on the main server and resets from there.
+    let d = bootbob_cow::Cow::open(&ex.path, &dir, &name, false).unwrap();
+    d.write_at(b"written on the store", 1 << 20).unwrap();
+    d.flush().unwrap();
+    drop(d);
+    let v = json(&main, &format!("/api/devices/{MAC}/overlays")).await;
+    assert_eq!(v[0]["source"], "s1:golden.img", "{v}");
+    let (s, body) = call(&main, Method::DELETE, &format!("/api/devices/{MAC}/overlays/s1:golden.img"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(json(&main, &format!("/api/devices/{MAC}/overlays")).await.as_array().unwrap().is_empty());
+}

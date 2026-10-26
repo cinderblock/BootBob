@@ -12,6 +12,7 @@ bootbob-dhcp.workspace = true
 bootbob-cow.workspace = true
 fatfs.workspace = true
 mdns-sd.workspace = true
+ureq.workspace = true
 bootbob-ipxe.workspace = true
 bootbob-nbd.workspace = true
 bootbob-pi.workspace = true

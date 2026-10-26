@@ -109,6 +109,41 @@ Copy-on-write works the same as for Pis. Disk images can be uploaded with
 `PUT /api/disks/<name>.img` (the body is the image; never overwrites) and deleted with
 `DELETE` once no image uses them.
 
+## Image stores
+
+Big things (backups, installers, many golden images) can live on another host with big
+disks: an **image store**, the same binary with `mode = "store"`. An image whose source
+is `<store>:<disk>.img` lives there.
+
+- Machines reach the store **directly** for NBD (`{server}` in a command line becomes the
+  store's address), so their root-filesystem traffic never goes through the main server.
+- The main server reads boot files (kernels, initrds, Pi firmware) from the store over
+  HTTP, through the machine's copy-on-write overlay, and serves them on as usual.
+- The main server still decides: for every NBD connection the store asks it
+  (`GET /api/store/allow`) whether that machine may open that disk, and through whose
+  overlay. Overlays live on the store; the main server lists and resets them.
+- Upload disk images to the store itself (`PUT http://<store>/api/disks/<name>.img`).
+
+Main server:
+
+```toml
+[[stores]]
+name = "uberfall"
+url = "http://10.255.0.3:8068"
+# nbd_host = "10.255.0.3"   # where machines reach its NBD; default: the host in url
+```
+
+Store:
+
+```toml
+mode = "store"
+store_name = "uberfall"
+main_url = "http://10.255.0.5:8067"
+data_dir = "/var/lib/bootbob"
+http = "10.255.0.3:8068"
+nbd = "10.255.0.3:10809"
+```
+
 ## A USB boot stick, and finding BootBob on the network
 
 `/files/usb/bootbob-usb.img` is a boot stick for this server: a small disk image with an
