@@ -71,12 +71,12 @@ gpg --show-keys --with-colons /work/raspberrypi.asc | grep -q "^fpr:*CF8A1AF502A
 gpg --dearmor < /work/raspberrypi.asc > /work/raspberrypi.gpg
 
 mmdebstrap --architectures=arm64 --variant=important \
-  --setup-hook="mkdir -p \"\$1/etc/apt/trusted.gpg.d\" && cp /work/raspberrypi.gpg \"\$1/etc/apt/trusted.gpg.d/raspberrypi.gpg\"" \
+  --setup-hook="mkdir -p \"\$1/etc/apt/keyrings\" && cp /work/raspberrypi.gpg \"\$1/etc/apt/keyrings/raspberrypi.gpg\"" \
   --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,initramfs-tools,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates \
   trixie "$ROOT" \
   "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware" \
   "deb http://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware" \
-  "deb http://archive.raspberrypi.com/debian trixie main"
+  "deb [signed-by=/etc/apt/keyrings/raspberrypi.gpg] http://archive.raspberrypi.com/debian trixie main"
 
 # Each machine makes its own on first boot. No /etc/hostname: DHCP names the machine.
 rm -f "$ROOT"/etc/ssh/ssh_host_* "$ROOT/etc/hostname" "$ROOT/var/lib/dbus/machine-id"
