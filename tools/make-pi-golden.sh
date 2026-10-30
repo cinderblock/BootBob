@@ -53,7 +53,8 @@ else
 fi
 
 # mmdebstrap needs to mount /proc in the new root and run package scripts in a chroot,
-# hence --privileged. The container is thrown away afterwards.
+# hence --privileged. The container is thrown away afterwards. The script is one
+# single-quoted string, so no apostrophes in it, comments included.
 # shellcheck disable=SC2086
 docker run --rm --privileged --platform linux/arm64 -v "$OUTDIR:/out" -v "$WORK:/tools:ro" $KEYMOUNT \
   -e NAME="$NAME" -e SIZE_GIB="$SIZE_GIB" -e TEST_KERNEL="${TEST_KERNEL:-}" debian:trixie sh -euc '
@@ -132,7 +133,7 @@ ExecStart=/usr/sbin/bootbob-first-boot
 [Install]
 WantedBy=multi-user.target
 EOF
-# /proc: raspi-firmware's hooks use ischroot, which can't tell without it.
+# /proc: the raspi-firmware hooks use ischroot, which needs it to tell.
 mount -t proc proc "$ROOT/proc"
 chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved bootbob-first-boot >/dev/null
 
@@ -194,4 +195,5 @@ fi
 mv "$IMG" "/out/$NAME"
 echo "built /out/$NAME: $(ls "$ROOT/lib/modules" | tr "\n" " "), $SIZE_GIB GiB"
 '
+[ -f "$OUT" ] || { echo "the build finished without making $OUT" >&2; exit 1; }
 echo "Done: $OUT"
