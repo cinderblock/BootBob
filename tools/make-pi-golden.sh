@@ -62,25 +62,30 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mmdebstrap dosfstools e2fs
 
 mkdir -p /work
 ROOT=/work/root
-# The Raspberry Pi archive key, checked against its well-known fingerprint.
-curl -fsS https://archive.raspberrypi.com/debian/raspberrypi.gpg.key -o /work/raspberrypi.asc
-gpg --show-keys --with-colons /work/raspberrypi.asc | grep -q "^fpr:*CF8A1AF502A2AA2D763BAE7E82B129927FA3303E:" || {
+# The Raspberry Pi archive key, from its keyring package and checked against its
+# well-known fingerprint. Not the copy on their website: that one carries only a SHA-1
+# binding signature, which apt on trixie refuses. mmdebstrap runs apt from out here, then
+# the image runs it from in there, so signed-by has to name a file in both.
+PIREPO=http://archive.raspberrypi.com/debian
+PIKEY=/usr/share/keyrings/raspberrypi-archive-keyring.pgp
+curl -fsS "$PIREPO/dists/trixie/main/binary-arm64/Packages.gz" | gunzip > /work/Packages
+DEB=$(sed -n "/^Package: raspberrypi-archive-keyring\$/,/^\$/s/^Filename: //p" /work/Packages)
+curl -fsS -o /work/keyring.deb "$PIREPO/$DEB"
+dpkg-deb -x /work/keyring.deb /work/keyring
+mkdir -p "$(dirname "$PIKEY")"
+cp "/work/keyring$PIKEY" "$PIKEY"
+gpg --show-keys --with-colons "$PIKEY" | grep -q "^fpr:*CF8A1AF502A2AA2D763BAE7E82B129927FA3303E:" || {
   echo "the Raspberry Pi archive key has an unexpected fingerprint" >&2
   exit 1
 }
-gpg --dearmor < /work/raspberrypi.asc > /work/raspberrypi.gpg
-# mmdebstrap runs apt from out here, then the image runs it from in there: signed-by has
-# to name a file in both.
-mkdir -p /etc/apt/keyrings
-cp /work/raspberrypi.gpg /etc/apt/keyrings/raspberrypi.gpg
 
 mmdebstrap --architectures=arm64 --variant=important \
-  --setup-hook="mkdir -p \"\$1/etc/apt/keyrings\" && cp /work/raspberrypi.gpg \"\$1/etc/apt/keyrings/raspberrypi.gpg\"" \
+  --setup-hook="mkdir -p \"\$1\$(dirname $PIKEY)\" && cp $PIKEY \"\$1$PIKEY\"" \
   --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,initramfs-tools,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates \
   trixie "$ROOT" \
   "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware" \
   "deb http://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware" \
-  "deb [signed-by=/etc/apt/keyrings/raspberrypi.gpg] http://archive.raspberrypi.com/debian trixie main"
+  "deb [signed-by=$PIKEY] $PIREPO trixie main"
 
 # Each machine makes its own on first boot. No /etc/hostname: DHCP names the machine.
 rm -f "$ROOT"/etc/ssh/ssh_host_* "$ROOT/etc/hostname" "$ROOT/var/lib/dbus/machine-id"
