@@ -743,6 +743,19 @@ async fn disk_images_can_be_uploaded_and_deleted() {
     assert!(!t.st.config.images_dir().join("empty.img").exists());
     assert!(!t.st.config.images_dir().join(".empty.img.upload").exists());
 
+    let encoded = |name: &str, encoding: &str, body: Vec<u8>| {
+        let st = t.st.clone();
+        let req = Request::builder().method(Method::PUT).uri(format!("/api/disks/{name}")).header("content-encoding", encoding).body(Body::from(body));
+        async move { router(st).oneshot(req.unwrap()).await.unwrap().status() }
+    };
+    let z = ruzstd::encoding::compress_to_vec(&b"a compressed image"[..], ruzstd::encoding::CompressionLevel::Fastest);
+    assert_eq!(encoded("zstd.img", "zstd", z).await, StatusCode::CREATED);
+    assert_eq!(std::fs::read(t.st.config.images_dir().join("zstd.img")).unwrap(), b"a compressed image");
+    assert_eq!(encoded("gz.img", "gzip", b"x".to_vec()).await, StatusCode::UNSUPPORTED_MEDIA_TYPE, "stored as it came, it'd be a broken disk");
+    assert_eq!(encoded("junk.img", "zstd", b"not zstd at all".to_vec()).await, StatusCode::BAD_REQUEST);
+    assert!(!t.st.config.images_dir().join("junk.img").exists());
+    assert!(!t.st.config.images_dir().join(".junk.img.upload").exists());
+
     // In use by an image: kept. Unused: deleted.
     pc_disk(&t, "used.img");
     call(&t.st, Method::PUT, "/api/images/used", Some(json!({"title": "Used", "disk": {"source": "used.img"}}))).await;
@@ -843,7 +856,7 @@ async fn a_store_serves_disks_the_main_server_decides_about() {
     get(&main, &ident("")).await;
     call(&main, Method::PUT, &format!("/api/devices/{MAC}/assignment"), Some(json!({"image": "golden"}))).await;
     let script = get(&main, &ident("&poll=1")).await;
-    assert!(script.contains("nbdroot=10.255.0.3,s1:golden.img,nbd0"), "{script}");
+    assert!(script.contains("nbdroot=10.255.0.3,golden.img,nbd0"), "the store's name for it: {script}");
 
     // The store asks the main server; only the assigned machine gets the disk.
     let mac: Mac = MAC.parse().unwrap();

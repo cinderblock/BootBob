@@ -14,7 +14,9 @@
 # BOOTBOB takes bootbob-nbd-client-aarch64 and the hook from a directory. TEST_KERNEL=1
 # also writes <out.img>.test-vmlinuz and .test-initrd: see tools/test-pi-golden.sh.
 #
-# Then upload it (`curl -T out.img http://<bootbob>:8067/api/disks/out.img`) and make a
+# Then upload it, compressed so its zeros don't cross the network (`zstd out.img`, then
+# `curl -T out.img.zst -H 'Content-Encoding: zstd' http://<bootbob>:8067/api/disks/out.img`)
+# and make a
 # BootBob Pi image: boot files out.img, copy-on-write on, command line
 #   console=ttyS0,115200 console=tty1 root=/dev/nbd0p2 nbdroot={server},out.img,nbd0 ip=dhcp NBDCLIENT=/usr/sbin/bootbob-nbd-client rootwait
 # No SSH keys built in? Put one in the boot partition before uploading, and the first

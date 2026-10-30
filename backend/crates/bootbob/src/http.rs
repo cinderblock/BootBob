@@ -284,7 +284,7 @@ pub(crate) fn pc_action(st: &State, img: &Image, mac: Mac, base: &str) -> Option
     let cmdline = d
         .cmdline
         .replace("{server}", &crate::stores::nbd_host(&st.config, &d.source, nbd_server(st, base)))
-        .replace("{disk}", &d.source)
+        .replace("{disk}", crate::stores::export_name(&d.source))
         .replace("{mac}", &dashed)
         .replace("{ip}", &ip);
     let initrds = if d.initrd.trim().is_empty() { vec![] } else { vec![url(d.initrd.trim())] };
@@ -682,29 +682,29 @@ async fn create_disk(Ax(st): Ax<St>, Json(d): Json<NewDisk>) -> Result<StatusCod
     Ok(StatusCode::CREATED)
 }
 
-/// Uploads a disk image (the request body, streamed to disk). Never overwrites one.
-async fn upload_disk(Ax(st): Ax<St>, Path(name): Path<String>, body: axum::body::Body) -> Result<StatusCode, ApiError> {
+/// Uploads a disk image (the request body, streamed to disk with its zeros as holes;
+/// zstd compressed with `Content-Encoding: zstd`). Never overwrites one.
+async fn upload_disk(Ax(st): Ax<St>, Path(name): Path<String>, headers: HeaderMap, body: axum::body::Body) -> Result<StatusCode, ApiError> {
     crate::nbd::check_disk_name(&name).map_err(bad)?;
+    let zstd = match headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes()) {
+        None | Some(b"identity") => false,
+        Some(b"zstd") => true,
+        Some(other) => {
+            let other = String::from_utf8_lossy(other);
+            return Err(ApiError(StatusCode::UNSUPPORTED_MEDIA_TYPE, format!("an upload can be zstd compressed, not {other}")));
+        }
+    };
     let dir = st.config.images_dir();
     let path = dir.join(&name);
     if path.exists() {
         return Err(ApiError(StatusCode::CONFLICT, format!("{name} already exists; delete it first")));
     }
     let tmp = dir.join(format!(".{name}.upload"));
-    let res: Result<u64, String> = async {
-        use tokio::io::AsyncWriteExt;
-        let mut f = tokio::fs::File::create(&tmp).await.map_err(|e| format!("can't create {name}: {e}"))?;
-        let mut n = 0u64;
-        let mut s = body.into_data_stream();
-        while let Some(chunk) = s.next().await {
-            let chunk = chunk.map_err(|e| format!("upload interrupted: {e}"))?;
-            f.write_all(&chunk).await.map_err(|e| format!("can't write {name}: {e}"))?;
-            n += chunk.len() as u64;
-        }
-        f.sync_all().await.map_err(|e| format!("can't write {name}: {e}"))?;
-        Ok(n)
-    }
-    .await;
+    let src = tokio_util::io::StreamReader::new(body.into_data_stream().map(|c| c.map_err(std::io::Error::other)));
+    let src = tokio_util::io::SyncIoBridge::new(src);
+    let to = tmp.clone();
+    let res = tokio::task::spawn_blocking(move || crate::sparse::receive(src, zstd, &to)).await;
+    let res = res.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| format!("can't store {name}: {e}")));
     let n = match res {
         Ok(0) => Err("the upload was empty".to_string()),
         other => other,

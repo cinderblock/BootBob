@@ -40,6 +40,8 @@ mdns-sd = { version = "0.21", default-features = false }
 # The main server and its image stores talk plain HTTP on the LAN: no TLS stack.
 ureq = { version = "3", default-features = false }
 redb = "4"
+# Compressed disk image uploads; pure Rust, so the build stays musl and nothing else.
+ruzstd = "0.9"
 serde = { version = "1", features = ["derive"] }
 # TCP keepalive timings for NBD connections (std only sets keepalive on or off).
 socket2 = { version = "0.6", features = ["all"] }
@@ -48,6 +50,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io", "io-util"] }
 toml = "1"
 tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1"

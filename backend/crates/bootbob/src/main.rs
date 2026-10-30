@@ -9,6 +9,7 @@ mod http;
 mod mdns;
 mod model;
 mod nbd;
+mod sparse;
 mod state;
 mod store;
 mod stores;

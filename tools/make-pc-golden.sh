@@ -9,7 +9,9 @@
 # baked in, so machines' roots survive BootBob restarting: add
 # NBDCLIENT=/usr/sbin/bootbob-nbd-client to the image's command line.
 #
-# Then upload it (`curl -T out.img http://<bootbob>:8067/api/disks/out.img`) and make a
+# Then upload it, compressed so its zeros don't cross the network (`zstd out.img`, then
+# `curl -T out.img.zst -H 'Content-Encoding: zstd' http://<bootbob>:8067/api/disks/out.img`)
+# and make a
 # BootBob image with a `disk` section: source out.img, kernel vmlinuz, initrd initrd.img,
 # command line `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp
 # NBDCLIENT=/usr/sbin/bootbob-nbd-client`, copy-on-write on.

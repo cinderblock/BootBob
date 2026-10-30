@@ -107,7 +107,13 @@ BootBob over HTTP (`/boot/disk/<image>/<file>`), and the initrd mounts the root 
 with a command line like `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp`.
 Copy-on-write works the same as for Pis. Disk images can be uploaded with
 `PUT /api/disks/<name>.img` (the body is the image; never overwrites) and deleted with
-`DELETE` once no image uses them.
+`DELETE` once no image uses them. Zeros are stored as holes, so an image takes only the
+space of its data. Compress an upload and they don't cross the network either:
+
+```sh
+zstd out.img
+curl -T out.img.zst -H 'Content-Encoding: zstd' http://<bootbob>:8067/api/disks/out.img
+```
 
 ## Image stores
 
@@ -123,6 +129,7 @@ is `<store>:<disk>.img` lives there.
   (`GET /api/store/allow`) whether that machine may open that disk, and through whose
   overlay. Overlays live on the store; the main server lists and resets them.
 - Upload disk images to the store itself (`PUT http://<store>/api/disks/<name>.img`).
+  `{disk}` in a command line is the store's name for the disk, without the `<store>:`.
 
 Main server:
 
@@ -216,7 +223,7 @@ for throwaway VMs.
 | `GET /api/images`, `PUT/DELETE /api/images/{id}` | The catalogue: for PCs an iPXE `action` (kernel, chain or script) or a `disk` image; for Pis a boot tree (`pi`); or one of each |
 | `GET /api/devices/{mac}/overlays` | A machine's copy-on-write overlays: image, bytes written, in use |
 | `DELETE /api/devices/{mac}/overlays/{image}` | Reset one: back on the pristine image at the next boot (409 while in use) |
-| `PUT /api/disks/{name}.img` | Upload a disk image (the request body) |
+| `PUT /api/disks/{name}.img` | Upload a disk image (the request body; zstd compressed with `Content-Encoding: zstd`) |
 | `DELETE /api/disks/{name}.img` | Delete one no image uses, with its overlays |
 | `GET /files/usb/bootbob-usb.img` | A USB boot stick that finds this server |
 | `GET /files/tools/…` | `bootbob-nbd-client-{x86_64,aarch64}` and its initramfs hook |
