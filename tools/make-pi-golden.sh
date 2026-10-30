@@ -137,6 +137,9 @@ EOF
 # /proc: the raspi-firmware hooks use ischroot, which needs it to tell.
 mount -t proc proc "$ROOT/proc"
 chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved bootbob-first-boot >/dev/null
+# Boot EEPROMs hold the network boot settings: changed on purpose, never by a boot. The
+# rpi-eeprom tools stay for doing that by hand.
+chroot "$ROOT" systemctl disable rpi-eeprom-update >/dev/null
 
 install -m 0755 /tools/bootbob-nbd-client-aarch64 "$ROOT/usr/sbin/bootbob-nbd-client"
 install -m 0755 /tools/bootbob-nbd-client.hook "$ROOT/etc/initramfs-tools/hooks/bootbob-nbd-client"
