@@ -69,6 +69,10 @@ gpg --show-keys --with-colons /work/raspberrypi.asc | grep -q "^fpr:*CF8A1AF502A
   exit 1
 }
 gpg --dearmor < /work/raspberrypi.asc > /work/raspberrypi.gpg
+# mmdebstrap runs apt from out here, then the image runs it from in there: signed-by has
+# to name a file in both.
+mkdir -p /etc/apt/keyrings
+cp /work/raspberrypi.gpg /etc/apt/keyrings/raspberrypi.gpg
 
 mmdebstrap --architectures=arm64 --variant=important \
   --setup-hook="mkdir -p \"\$1/etc/apt/keyrings\" && cp /work/raspberrypi.gpg \"\$1/etc/apt/keyrings/raspberrypi.gpg\"" \
