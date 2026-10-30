@@ -88,5 +88,7 @@ sleep 3
 serve
 sleep 15
 check "root survived the restart, still read-write" 'findmnt -no OPTIONS / | grep -q "^rw" && wc -l < /var/tmp/writes'
+check "writes kept going after the restart" 'a=$(wc -l < /var/tmp/writes); sleep 10; b=$(wc -l < /var/tmp/writes); echo "$a then $b"; test "$b" -gt "$a"'
+vm 'dmesg | grep -i nbd | tail -8' >&2 || true
 check "no I/O errors" '! dmesg | grep -E "I/O error|Remounting filesystem read-only|EXT4-fs error"'
 echo "PASSED"
