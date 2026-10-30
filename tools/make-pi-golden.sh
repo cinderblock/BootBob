@@ -92,8 +92,9 @@ mmdebstrap --architectures=arm64 --variant=important \
 rm -f "$ROOT"/etc/ssh/ssh_host_* "$ROOT/etc/hostname" "$ROOT/var/lib/dbus/machine-id"
 : > "$ROOT/etc/machine-id"
 
-# The initramfs set up /dev/nbd0 before anything here runs.
-printf "/dev/nbd0p2\t/\text4\tdefaults,noatime\t0\t1\n/dev/nbd0p1\t/boot/firmware\tvfat\tdefaults\t0\t2\n" > "$ROOT/etc/fstab"
+# The initramfs set up /dev/nbd0 before anything here runs. nofail: with no boot
+# partition a machine can still come up to be fixed; emergency mode has no way in.
+printf "/dev/nbd0p2\t/\text4\tdefaults,noatime\t0\t1\n/dev/nbd0p1\t/boot/firmware\tvfat\tdefaults,nofail\t0\t2\n" > "$ROOT/etc/fstab"
 echo nbd >> "$ROOT/etc/initramfs-tools/modules"
 
 cat > "$ROOT/etc/systemd/network/10-wired.network" <<EOF
@@ -183,7 +184,7 @@ if [ -n "$TEST_KERNEL" ]; then
   T=/work/testroot
   rm -f "$T/etc/resolv.conf"
   cp /etc/resolv.conf "$T/etc/resolv.conf"
-  printf "virtio_pci\nvirtio_net\n" >> "$T/etc/initramfs-tools/modules"
+  printf "virtio_pci\nvirtio_net\nvfat\nnls_cp437\nnls_ascii\n" >> "$T/etc/initramfs-tools/modules"
   mount -t proc proc "$T/proc"
   chroot "$T" sh -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq linux-image-arm64" >/dev/null
   umount "$T/proc"
