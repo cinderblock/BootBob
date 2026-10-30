@@ -81,7 +81,7 @@ gpg --show-keys --with-colons "$PIKEY" | grep -q "^fpr:*CF8A1AF502A2AA2D763BAE7E
 
 mmdebstrap --architectures=arm64 --variant=important \
   --setup-hook="mkdir -p \"\$1\$(dirname $PIKEY)\" && cp $PIKEY \"\$1$PIKEY\"" \
-  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,initramfs-tools,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates \
+  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,initramfs-tools,zstd,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates \
   trixie "$ROOT" \
   "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware" \
   "deb http://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware" \
@@ -132,11 +132,14 @@ ExecStart=/usr/sbin/bootbob-first-boot
 [Install]
 WantedBy=multi-user.target
 EOF
+# /proc: raspi-firmware's hooks use ischroot, which can't tell without it.
+mount -t proc proc "$ROOT/proc"
 chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved bootbob-first-boot >/dev/null
 
 install -m 0755 /tools/bootbob-nbd-client-aarch64 "$ROOT/usr/sbin/bootbob-nbd-client"
 install -m 0755 /tools/bootbob-nbd-client.hook "$ROOT/etc/initramfs-tools/hooks/bootbob-nbd-client"
 chroot "$ROOT" update-initramfs -u -k all >/dev/null
+umount "$ROOT/proc"
 
 FW="$ROOT/boot/firmware"
 cat > "$FW/config.txt" <<EOF
@@ -180,7 +183,9 @@ if [ -n "$TEST_KERNEL" ]; then
   rm -f "$T/etc/resolv.conf"
   cp /etc/resolv.conf "$T/etc/resolv.conf"
   printf "virtio_pci\nvirtio_net\n" >> "$T/etc/initramfs-tools/modules"
+  mount -t proc proc "$T/proc"
   chroot "$T" sh -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq linux-image-arm64" >/dev/null
+  umount "$T/proc"
   KVER=$(ls "$T/boot" | sed -n "s/^vmlinuz-\(.*-arm64\)$/\1/p" | sort -V | tail -1)
   cp "$T/boot/vmlinuz-$KVER" "/out/$NAME.test-vmlinuz"
   cp "$T/boot/initrd.img-$KVER" "/out/$NAME.test-initrd"
