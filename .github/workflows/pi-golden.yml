@@ -1,0 +1,47 @@
+name: Pi golden image
+
+# Builds the Raspberry Pi golden image natively on an arm64 runner and boots it in a VM
+# over NBD (tools/test-pi-golden.sh). The image has no credentials in it, so it can be
+# an artifact: put your own authorized_keys in its boot partition before uploading it
+# to BootBob (see tools/make-pi-golden.sh).
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - tools/make-pi-golden.sh
+      - tools/test-pi-golden.sh
+      - tools/bootbob-nbd-client.hook
+      - .github/workflows/pi-golden.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch bootbob-nbd-client from the latest published BootBob
+        run: |
+          # An amd64 image, but the tools are only copied out, never run here.
+          docker pull -q --platform linux/amd64 ghcr.io/cinderblock/bootbob:latest
+          id=$(docker create --platform linux/amd64 ghcr.io/cinderblock/bootbob:latest)
+          docker cp "$id:/usr/share/bootbob/tools" client-tools
+          docker rm "$id"
+      - name: Build
+        run: TOOLS=client-tools TEST_KERNEL=1 sh tools/make-pi-golden.sh ./golden-pi.img
+      - name: Install the test's tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm qemu-utils mtools
+      - name: Boot it in a VM
+        run: sh tools/test-pi-golden.sh ./golden-pi.img
+      - name: Compress
+        run: zstd -T0 -6 --sparse golden-pi.img -o golden-pi.img.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: golden-pi
+          path: golden-pi.img.zst
+          retention-days: 30
+          compression-level: 0
