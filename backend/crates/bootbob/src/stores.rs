@@ -47,6 +47,12 @@ pub fn nbd_host(config: &Config, source: &str, local: String) -> String {
     }
 }
 
+/// The name machines ask the NBD server for: the store knows its disks without the
+/// `name:` that says which store.
+pub fn export_name(source: &str) -> &str {
+    source.split_once(':').map_or(source, |(_, disk)| disk)
+}
+
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(60))).http_status_as_error(false).build().into()
 }
