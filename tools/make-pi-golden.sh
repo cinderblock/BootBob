@@ -3,7 +3,8 @@
 # FAT boot partition (firmware, kernels, initramfs, config.txt) and an ext4 root
 # filesystem the initramfs mounts over NBD. Built from packages, not cloned from a Pi, so
 # it holds nothing of any machine's: every copy gets its own SSH host keys and machine-id
-# on first boot, and its hostname from DHCP. Works on Pi 3, 4 and 5 (and Zero 2 W).
+# on first boot, and its hostname from DHCP. It carries the kernels for 64-bit Pis up to
+# the Pi 5; a Pi 4 is what it is built to be tested on.
 #
 #   BOOTBOB=http://<bootbob>:8067 tools/make-pi-golden.sh <out.img> [size-GiB] [authorized_keys-file]
 #
