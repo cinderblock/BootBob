@@ -115,6 +115,48 @@ impl Client {
 }
 
 #[tokio::test]
+async fn a_restart_answers_what_was_sent_before_it_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("disk.img"), vec![0u8; 1 << 20]).unwrap();
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let live = Arc::new(Live::default());
+    let server = tokio::spawn(serve_with(l, Arc::new(Dir(dir.path().to_path_buf())), live.clone()));
+
+    let mut c = Client::connect(addr).await;
+    c.go("disk").await.unwrap();
+
+    // Several writes on the wire when the restart comes, as the kernel sends them: not
+    // one waits for the last one's reply.
+    let writes = 20u64;
+    for i in 0..writes {
+        c.s.write_u32(REQUEST_MAGIC).await.unwrap();
+        c.s.write_u16(0).await.unwrap();
+        c.s.write_u16(CMD_WRITE).await.unwrap();
+        c.s.write_u64(100 + i).await.unwrap();
+        c.s.write_u64(4096 * i).await.unwrap();
+        c.s.write_u32(5).await.unwrap();
+        c.s.write_all(b"drain").await.unwrap();
+    }
+    let started = Instant::now();
+    live.drain().await;
+    assert!(started.elapsed() < DRAIN_LIMIT, "it went quiet, so no need to wait it out");
+    assert!(!live.in_use(&dir.path().join("disk.img")));
+
+    for i in 0..writes {
+        assert_eq!(c.s.read_u32().await.unwrap(), SIMPLE_REPLY_MAGIC);
+        assert_eq!(c.s.read_u32().await.unwrap(), 0);
+        assert_eq!(c.s.read_u64().await.unwrap(), 100 + i);
+    }
+    assert_eq!(c.s.read_u8().await.unwrap_err().kind(), io::ErrorKind::UnexpectedEof, "then it closes cleanly");
+    let on_disk = std::fs::read(dir.path().join("disk.img")).unwrap();
+    assert_eq!(&on_disk[4096 * (writes as usize - 1)..][..5], b"drain");
+
+    server.await.unwrap().unwrap();
+    assert!(TcpStream::connect(addr).await.is_err(), "no new connections");
+}
+
+#[tokio::test]
 async fn reads_writes_and_flushes_through_to_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let addr = server(dir.path()).await;

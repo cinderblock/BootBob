@@ -82,7 +82,7 @@ to hand the kernel a new connection the moment BootBob is back: a restart is a p
 Install both (the hook as `/etc/initramfs-tools/hooks/bootbob-nbd-client`), run
 `update-initramfs -u`, and add `NBDCLIENT=/usr/sbin/bootbob-nbd-client` to the kernel
 command line; Debian's NBD root script then runs it. `tools/pi-clone-to-nbd.sh` and
-`tools/make-pc-golden.sh` do all of this.
+`tools/make-pc-golden.sh` do all of this. BootBob answers what it was sent before it stops, so a restart is a blink; if it crashes, machines also pause about 30 s for the requests it never answered.
 
 **One image, many Pis.** Mark a Pi image *copy-on-write* and each machine gets its own
 overlay of the disk (`<data_dir>/overlays/<mac>/`): a sparse file holding only the 4 KiB

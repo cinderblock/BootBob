@@ -23,11 +23,18 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bootbob_cow::{Cow, Disk, Plain};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
+
+/// Stopping, a connection this quiet has answered everything it was sent.
+const DRAIN_QUIET: Duration = Duration::from_millis(10);
+/// Stopping, how long a machine that never goes quiet can hold up the restart. Well inside
+/// Docker's 10 s before it kills a container.
+const DRAIN_LIMIT: Duration = Duration::from_secs(3);
 
 const NBDMAGIC: u64 = 0x4e42_444d_4147_4943; // "NBDMAGIC"
 const IHAVEOPT: u64 = 0x4948_4156_454f_5054; // "IHAVEOPT"
@@ -122,11 +129,24 @@ pub trait Exports: Send + Sync + 'static {
 pub struct Live {
     next: AtomicU64,
     by_key: Mutex<HashMap<PathBuf, (u64, oneshot::Sender<()>)>>,
+    stopping: watch::Sender<bool>,
 }
 
 impl Live {
     pub fn in_use(&self, key: &std::path::Path) -> bool {
         self.by_key.lock().unwrap().contains_key(key)
+    }
+
+    /// Stops the server for a restart: no new connections, and each one ends once it has
+    /// answered everything it was sent. An unanswered request is what hurts: the kernel
+    /// reconnects at once but resends it only when it times out, half a minute of a
+    /// machine standing still. Returns when they've ended, or after [`DRAIN_LIMIT`].
+    pub async fn drain(&self) {
+        self.stopping.send_replace(true);
+        let deadline = Instant::now() + DRAIN_LIMIT;
+        while !self.by_key.lock().unwrap().is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// Takes the export, ending whoever had it. The returned receiver fires if someone
@@ -158,15 +178,19 @@ impl Live {
     }
 }
 
-/// Serves NBD on `listener` until it fails.
+/// Serves NBD on `listener` until it fails or [`Live::drain`].
 pub async fn serve<E: Exports>(listener: TcpListener, exports: Arc<E>) -> io::Result<()> {
     serve_with(listener, exports, Arc::new(Live::default())).await
 }
 
 /// [`serve`], sharing `live` with whoever wants to know what's in use.
 pub async fn serve_with<E: Exports>(listener: TcpListener, exports: Arc<E>, live: Arc<Live>) -> io::Result<()> {
+    let mut stopping = live.stopping.subscribe();
     loop {
-        let (sock, peer) = listener.accept().await?;
+        let (sock, peer) = tokio::select! {
+            r = listener.accept() => r?,
+            _ = stopping.wait_for(|s| *s) => return Ok(()),
+        };
         let (exports, live) = (exports.clone(), live.clone());
         tokio::spawn(async move {
             if let Err(e) = connection(sock, peer, exports, live).await {
@@ -198,8 +222,9 @@ async fn connection<E: Exports>(mut sock: TcpStream, peer: SocketAddr, exports: 
     tracing::info!(%peer, export = export.name, size, cow = export.overlay.is_some(), "NBD export in use");
 
     let mut stats = Stats::default();
+    let stopping = live.stopping.subscribe();
     let result = tokio::select! {
-        r = transmission(&mut sock, &disk, &mut stats) => r,
+        r = transmission(&mut sock, &disk, &mut stats, stopping) => r,
         _ = &mut kick_rx => Err(io::Error::other("replaced by a newer connection to the same export")),
     };
     // Whatever happened, what was written is on disk before anyone else gets the export.
@@ -368,11 +393,33 @@ fn errno(e: &io::Error) -> u32 {
     }
 }
 
-async fn transmission(sock: &mut TcpStream, disk: &Arc<dyn Disk>, stats: &mut Stats) -> io::Result<()> {
+/// Waits for the next request. `false`: the server is stopping and nothing more came.
+/// `peek` and not the read itself, because a cancelled read loses what it had read.
+async fn next_request(sock: &TcpStream, stopping: &mut watch::Receiver<bool>) -> io::Result<bool> {
+    let mut byte = [0u8; 1];
+    loop {
+        let stop = *stopping.borrow();
+        tokio::select! {
+            r = sock.peek(&mut byte) => return r.map(|_| true),
+            _ = stopping.wait_for(|s| *s), if !stop => {}
+            _ = tokio::time::sleep(DRAIN_QUIET), if stop => return Ok(false),
+        }
+    }
+}
+
+async fn transmission(
+    sock: &mut TcpStream,
+    disk: &Arc<dyn Disk>,
+    stats: &mut Stats,
+    mut stopping: watch::Receiver<bool>,
+) -> io::Result<()> {
     let size = disk.size();
     let read_only = disk.read_only();
     let mut hdr = [0u8; 28];
     loop {
+        if !next_request(sock, &mut stopping).await? {
+            return Ok(());
+        }
         sock.read_exact(&mut hdr).await?;
         let magic = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
         if magic != REQUEST_MAGIC {

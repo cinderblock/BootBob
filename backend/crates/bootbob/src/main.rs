@@ -65,11 +65,18 @@ async fn store(config: Config, st: Arc<State>) -> anyhow::Result<()> {
     });
     let listener = tokio::net::TcpListener::bind(config.http).await.with_context(|| format!("HTTP: can't listen on {}", config.http))?;
     tracing::info!(addr = %config.http, "store: HTTP listening");
-    axum::serve(listener, http::store_router(st)).with_graceful_shutdown(shutdown_signal()).await?;
+    let live = st.nbd_live.clone();
+    axum::serve(listener, http::store_router(st)).with_graceful_shutdown(shutdown_signal(live)).await?;
     Ok(())
 }
 
-async fn shutdown_signal() {
+/// Waits to be told to stop, then lets NBD connections finish what they're doing.
+async fn shutdown_signal(live: Arc<bootbob_nbd::Live>) {
+    stop_requested().await;
+    live.drain().await;
+}
+
+async fn stop_requested() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
@@ -153,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(config.http).await.with_context(|| format!("HTTP: can't listen on {}", config.http))?;
     tracing::info!(addr = %config.http, "HTTP: listening");
-    axum::serve(listener, http::router(st)).with_graceful_shutdown(shutdown_signal()).await?;
+    let live = st.nbd_live.clone();
+    axum::serve(listener, http::router(st)).with_graceful_shutdown(shutdown_signal(live)).await?;
     Ok(())
 }
