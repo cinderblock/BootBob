@@ -745,13 +745,21 @@ async fn disk_images_can_be_uploaded_and_deleted() {
 
     let encoded = |name: &str, encoding: &str, body: Vec<u8>| {
         let st = t.st.clone();
-        let req = Request::builder().method(Method::PUT).uri(format!("/api/disks/{name}")).header("content-encoding", encoding).body(Body::from(body));
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/disks/{name}"))
+            .header("content-encoding", encoding)
+            .body(Body::from(body));
         async move { router(st).oneshot(req.unwrap()).await.unwrap().status() }
     };
     let z = ruzstd::encoding::compress_to_vec(&b"a compressed image"[..], ruzstd::encoding::CompressionLevel::Fastest);
     assert_eq!(encoded("zstd.img", "zstd", z).await, StatusCode::CREATED);
     assert_eq!(std::fs::read(t.st.config.images_dir().join("zstd.img")).unwrap(), b"a compressed image");
-    assert_eq!(encoded("gz.img", "gzip", b"x".to_vec()).await, StatusCode::UNSUPPORTED_MEDIA_TYPE, "stored as it came, it'd be a broken disk");
+    assert_eq!(
+        encoded("gz.img", "gzip", b"x".to_vec()).await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "stored as it came, it'd be a broken disk"
+    );
     assert_eq!(encoded("junk.img", "zstd", b"not zstd at all".to_vec()).await, StatusCode::BAD_REQUEST);
     assert!(!t.st.config.images_dir().join("junk.img").exists());
     assert!(!t.st.config.images_dir().join(".junk.img.upload").exists());
