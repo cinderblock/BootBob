@@ -158,11 +158,11 @@ mod tests {
 
     #[test]
     fn macs() {
-        let m: Mac = "DC-A6-32-03-FC-36".parse().unwrap();
-        assert_eq!(m.to_string(), "dc:a6:32:03:fc:36");
-        assert_eq!(m.short(), "03fc36");
+        let m: Mac = "DC-A6-32-0A-0B-0C".parse().unwrap();
+        assert_eq!(m.to_string(), "dc:a6:32:0a:0b:0c");
+        assert_eq!(m.short(), "0a0b0c");
         assert!(m.is_raspberry_pi());
-        assert_eq!("dca63203fc36".parse::<Mac>().unwrap(), m);
+        assert_eq!("dca6320a0b0c".parse::<Mac>().unwrap(), m);
         assert!("dc:a6:32".parse::<Mac>().is_err());
         assert!("zz:a6:32:03:fc:36".parse::<Mac>().is_err());
     }
