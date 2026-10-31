@@ -32,16 +32,16 @@ jobs:
           docker cp "$id:/usr/share/bootbob/tools" client-tools
           docker rm "$id"
       - name: Build
-        run: TOOLS=client-tools TEST_KERNEL=1 sh tools/make-pi-golden.sh ./golden-pi.img
+        run: TOOLS=client-tools TEST_KERNEL=1 sh tools/make-pi-golden.sh ./debian-trixie-rpi-arm64.img
       - name: Install the test's tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm qemu-utils mtools
       - name: Boot it in a VM
-        run: sh tools/test-pi-golden.sh ./golden-pi.img
+        run: sh tools/test-pi-golden.sh ./debian-trixie-rpi-arm64.img
       - name: Compress
-        run: zstd -T0 -6 --sparse golden-pi.img -o golden-pi.img.zst
+        run: zstd -T0 -6 --sparse debian-trixie-rpi-arm64.img -o debian-trixie-rpi-arm64.img.zst
       - uses: actions/upload-artifact@v4
         with:
-          name: golden-pi
-          path: golden-pi.img.zst
+          name: debian-trixie-rpi-arm64
+          path: debian-trixie-rpi-arm64.img.zst
           retention-days: 30
           compression-level: 0

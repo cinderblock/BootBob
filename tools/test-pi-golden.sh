@@ -3,7 +3,7 @@
 # The Pi kernels and firmware can't run in QEMU's virt machine, so this uses the generic
 # kernel TEST_KERNEL=1 builds; everything else is the real image: the initramfs's NBD
 # root with bootbob-nbd-client, first boot, networking, and the root surviving the NBD
-# server restarting. Only real Pi hardware can prove the firmware's network boot.
+# server restarting. Only real Pi hardware proves the firmware's network boot.
 #
 #   tools/test-pi-golden.sh <out.img>
 #
@@ -78,6 +78,7 @@ check "networkd manages the interface and kept the address" 'networkctl --no-pag
 check "DNS works" 'getent hosts deb.debian.org'
 check "apt reaches both repositories" 'apt-get update 2>&1 | tail -2; apt-cache policy raspi-firmware | grep -q archive.raspberrypi.com'
 check "EEPROM updates are on, for boards that have an EEPROM" 'test "$(systemctl is-enabled rpi-eeprom-update)" = enabled'
+check "Wi-Fi and Bluetooth firmware" 'ls /lib/firmware/brcm | grep -q brcmfmac43455-sdio && ls /lib/firmware/brcm | grep -q BCM4345C0'
 check "the Pi kernels are in the boot partition" 'ls /boot/firmware/kernel8.img /boot/firmware/kernel_2712.img /boot/firmware/initramfs8'
 
 echo "== restarting the NBD server under a writing machine"

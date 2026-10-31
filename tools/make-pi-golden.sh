@@ -4,7 +4,8 @@
 # filesystem the initramfs mounts over NBD. Built from packages, not cloned from a Pi, so
 # it holds nothing of any machine's: every copy gets its own SSH host keys and machine-id
 # on first boot, and its hostname from DHCP. It carries the kernels for 64-bit Pis up to
-# the Pi 5; a Pi 4 is what it is built to be tested on.
+# the Pi 5; it has run on a real Pi 4 (over NBD from a store, with Wi-Fi, EEPROM updates and
+# a reboot keeping its changes), and not yet on a Pi 5.
 #
 #   BOOTBOB=http://<bootbob>:8067 tools/make-pi-golden.sh <out.img> [size-GiB] [authorized_keys-file]
 #
@@ -84,7 +85,7 @@ gpg --show-keys --with-colons "$PIKEY" | grep -q "^fpr:*CF8A1AF502A2AA2D763BAE7E
 
 mmdebstrap --architectures=arm64 --variant=important \
   --setup-hook="mkdir -p \"\$1\$(dirname $PIKEY)\" && cp $PIKEY \"\$1$PIKEY\"" \
-  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,initramfs-tools,zstd,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates \
+  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,firmware-brcm80211,bluez-firmware,initramfs-tools,zstd,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates \
   trixie "$ROOT" \
   "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware" \
   "deb http://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware" \
@@ -139,6 +140,7 @@ EOF
 # /proc: the raspi-firmware hooks use ischroot, which needs it to tell.
 mount -t proc proc "$ROOT/proc"
 chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved bootbob-first-boot >/dev/null
+printf "LANG=C.UTF-8\n" > "$ROOT/etc/default/locale"
 # Boot EEPROM updates arrive with apt like any Pi OS, and keep the EEPROM settings. Only
 # these boards have one, and nothing else (a VM) has anything to update.
 mkdir -p "$ROOT/etc/systemd/system/rpi-eeprom-update.service.d"
