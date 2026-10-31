@@ -32,6 +32,8 @@ from the catalogue, on a Pi" looks like it should work, and is what people will 
 
 ## Disks and overlays never give space back: the NBD server has no TRIM
 
+**In progress: TRIM thread (DeskyPi `plans/pxe-netboot.md`).**
+
 Exported disks are sparse, but only until a block is written. The server doesn't offer
 `NBD_CMD_TRIM`, so on desky `/sys/block/nbd0/queue/discard_max_bytes` is 0, and `fstrim` can't
 reclaim anything even though `fstrim.timer` is enabled. Seen 2026-10-31: `desky.img` is 32 GiB
