@@ -29,3 +29,13 @@ from the catalogue, on a Pi" looks like it should work, and is what people will 
 `sparse::not_a_disk` refuses them with a clear message. That rules out Ubuntu's cloud images
 (`.img` that is really qcow2) and about half of the third-party images in Raspberry Pi's list
 (`.zip`; `catalogue::parse_pi_os` leaves them out). Debian's `.raw` and Pi OS's `.img.xz` work.
+
+## Disks and overlays never give space back: the NBD server has no TRIM
+
+Exported disks are sparse, but only until a block is written. The server doesn't offer
+`NBD_CMD_TRIM`, so on desky `/sys/block/nbd0/queue/discard_max_bytes` is 0, and `fstrim` can't
+reclaim anything even though `fstrim.timer` is enabled. Seen 2026-10-31: `desky.img` is 32 GiB
+long and 11 GiB on disk, with 9.8 GiB in use. Deleted files stay allocated, so a device's
+space only ever grows towards its full length. Copy-on-write overlays have the same problem,
+and there a trimmed block can't just become a hole, because that would show the base image's
+data again.
