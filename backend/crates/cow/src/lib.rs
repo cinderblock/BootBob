@@ -17,17 +17,29 @@
 //! over), then one bit per chunk. A write
 //! lands in the overlay before its bit is set, so a crash in between loses that write but
 //! never shows a half-written chunk. [`Disk::flush`] makes both durable.
+//!
+//! Space goes back with [`Disk::discard`]. On a [`Plain`] disk that's a hole in the file,
+//! which reads as zeroes. In an overlay a hole means nothing by itself: the map decides.
+//! With the chunk's bit clear, a hole is just a chunk that was never written, and reads
+//! show the base. So a discarded chunk is a hole **with its bit set**: reads go to the
+//! overlay, find a hole, and get zeroes, while the chunk takes no space. That needs no
+//! change to either file's format, and every build reads such an overlay correctly. The
+//! hole comes before the bit, for the same reason a write does: a crash in between
+//! leaves the chunk as it was.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A copy-on-write chunk: the unit a bit in the map covers. The Pi's filesystems use
 /// 4 KiB blocks, so a typical write needs no copy-up at all.
 pub const CHUNK: u64 = 4096;
 const HEADER: u64 = 4096;
 const MAGIC: &[u8; 8] = b"BBCOW01\n";
+/// [`Disk::write_zeroes`] writes this much at a time.
+const ZERO_RUN: u64 = 1 << 20;
 
 /// Random access to a fixed-size block of bytes.
 pub trait Disk: Send + Sync {
@@ -39,6 +51,24 @@ pub trait Disk: Send + Sync {
     fn write_at(&self, buf: &[u8], off: u64) -> io::Result<()>;
     /// Makes every write so far durable.
     fn flush(&self) -> io::Result<()>;
+    /// Whether [`Disk::discard`] works here: it depends on the filesystem and the platform.
+    fn can_discard(&self) -> bool;
+    /// Makes `len` bytes at `off` read as zeroes, giving the space back. Partial blocks at
+    /// either end read as zeroes too; they just keep their space. As with a write,
+    /// [`Disk::flush`] makes it durable. The range must be within the disk.
+    fn discard(&self, off: u64, len: u64) -> io::Result<()>;
+    /// Makes `len` bytes at `off` read as zeroes and keeps them allocated, so a later write
+    /// there can't run out of space. The range must be within the disk.
+    fn write_zeroes(&self, off: u64, len: u64) -> io::Result<()> {
+        let zeroes = vec![0u8; len.min(ZERO_RUN) as usize];
+        let mut at = off;
+        while at < off + len {
+            let n = (off + len - at).min(ZERO_RUN);
+            self.write_at(&zeroes[..n as usize], at)?;
+            at += n;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -79,6 +109,45 @@ pub fn pwrite(f: &File, mut buf: &[u8], mut off: u64) -> io::Result<()> {
     Ok(())
 }
 
+/// Gives a range of a file back to the filesystem. It reads as zeroes afterwards, and the
+/// file stays the same length. Fails on filesystems that can't, and off Linux.
+#[cfg(target_os = "linux")]
+pub fn punch_hole(f: &File, off: u64, len: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+    loop {
+        // SAFETY: no pointers, and the descriptor is open for as long as `f` is borrowed.
+        if unsafe { libc::fallocate(f.as_raw_fd(), mode, off as libc::off_t, len as libc::off_t) } == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// Gives a range of a file back to the filesystem: only on Linux so far.
+#[cfg(not(target_os = "linux"))]
+pub fn punch_hole(_: &File, _: u64, _: u64) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// Whether files in `dir` can have holes punched in them. This tries a scratch file and not
+/// the disk, because even a punch that changes nothing can count as modifying a file, and
+/// an image's modification time is what ties overlays to their base.
+fn can_punch(dir: &Path) -> bool {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let scratch = dir.join(format!(".punch-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let Ok(f) = OpenOptions::new().write(true).create_new(true).open(&scratch) else { return false };
+    let ok = f.set_len(2 * CHUNK).is_ok() && punch_hole(&f, 0, CHUNK).is_ok();
+    let _ = std::fs::remove_file(&scratch);
+    ok
+}
+
 /// Bytes a file occupies on disk (a sparse file's holes don't count). On Windows, its
 /// length.
 pub fn allocated(path: &Path) -> io::Result<u64> {
@@ -103,13 +172,15 @@ pub struct Plain {
     file: File,
     size: u64,
     read_only: bool,
+    can_discard: bool,
 }
 
 impl Plain {
     pub fn open(path: &Path, read_only: bool) -> io::Result<Plain> {
         let file = OpenOptions::new().read(true).write(!read_only).open(path)?;
         let size = file.metadata()?.len();
-        Ok(Plain { file, size, read_only })
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        Ok(Plain { file, size, read_only, can_discard: !read_only && can_punch(dir) })
     }
 }
 
@@ -132,6 +203,17 @@ impl Disk for Plain {
     fn flush(&self) -> io::Result<()> {
         self.file.sync_data()
     }
+    fn can_discard(&self) -> bool {
+        self.can_discard
+    }
+    fn discard(&self, off: u64, len: u64) -> io::Result<()> {
+        check(!self.read_only, "the disk is read-only")?;
+        check(off.checked_add(len).is_some_and(|end| end <= self.size), "discard past the end of the disk")?;
+        if len == 0 {
+            return Ok(());
+        }
+        punch_hole(&self.file, off, len)
+    }
 }
 
 // ── Cow ───────────────────────────────────────────────────────────────
@@ -143,9 +225,11 @@ pub struct Cow {
     size: u64,
     overlay: File,
     map: File,
-    /// One bit per chunk, LSB first: set when the chunk is in the overlay.
+    /// One bit per chunk, LSB first: set when the overlay decides what the chunk reads
+    /// as, whether that's data or (a discarded chunk) a hole.
     bits: Mutex<Vec<u8>>,
     read_only: bool,
+    can_discard: bool,
 }
 
 /// The two files of an overlay named `name` in `dir`.
@@ -216,7 +300,7 @@ impl Cow {
                 overlay.set_len(size)?;
             }
         }
-        Ok(Cow { base: base_f, size, overlay, map, bits: Mutex::new(bits), read_only })
+        Ok(Cow { base: base_f, size, overlay, map, bits: Mutex::new(bits), read_only, can_discard: !read_only && can_punch(dir) })
     }
 
     /// Whether an overlay `name` exists in `dir`.
@@ -259,6 +343,36 @@ impl Cow {
         let from = if Self::in_overlay(bits, off / CHUNK) { &self.overlay } else { &self.base };
         pread(from, buf, off)
     }
+
+    /// Writes `buf`, which isn't empty, at `off`, and sets its chunks' bits.
+    fn write_locked(&self, bits: &mut [u8], buf: &[u8], off: u64) -> io::Result<()> {
+        let end = off + buf.len() as u64;
+        let (first, last) = (off / CHUNK, (end - 1) / CHUNK);
+
+        // A partly covered chunk not yet in the overlay: bring the whole chunk up from
+        // the base first, so the bytes around the write stay what they were.
+        for c in [first, last] {
+            let (cs, ce) = (c * CHUNK, ((c + 1) * CHUNK).min(self.size));
+            if !Self::in_overlay(bits, c) && (off > cs || end < ce) {
+                let mut chunk = vec![0u8; (ce - cs) as usize];
+                pread(&self.base, &mut chunk, cs)?;
+                pwrite(&self.overlay, &chunk, cs)?;
+            }
+        }
+        pwrite(&self.overlay, buf, off)?;
+
+        // Then the bits: a crash before this point loses the write, not the chunk.
+        self.set_bits(bits, first, last)
+    }
+
+    /// Sets the bits of chunks `first..=last`, in memory and in the map.
+    fn set_bits(&self, bits: &mut [u8], first: u64, last: u64) -> io::Result<()> {
+        for c in first..=last {
+            bits[(c / 8) as usize] |= 1 << (c % 8);
+        }
+        let (b0, b1) = ((first / 8) as usize, (last / 8) as usize);
+        pwrite(&self.map, &bits[b0..=b1], HEADER + b0 as u64)
+    }
 }
 
 impl Disk for Cow {
@@ -295,33 +409,48 @@ impl Disk for Cow {
         if buf.is_empty() {
             return Ok(());
         }
-        let end = off + buf.len() as u64;
-        let (first, last) = (off / CHUNK, (end - 1) / CHUNK);
-        let mut bits = self.bits.lock().unwrap();
-
-        // A partly covered chunk not yet in the overlay: bring the whole chunk up from
-        // the base first, so the bytes around the write stay what they were.
-        for c in [first, last] {
-            let (cs, ce) = (c * CHUNK, ((c + 1) * CHUNK).min(self.size));
-            if !Self::in_overlay(&bits, c) && (off > cs || end < ce) {
-                let mut chunk = vec![0u8; (ce - cs) as usize];
-                pread(&self.base, &mut chunk, cs)?;
-                pwrite(&self.overlay, &chunk, cs)?;
-            }
-        }
-        pwrite(&self.overlay, buf, off)?;
-
-        // Then the bits: a crash before this point loses the write, not the chunk.
-        let (b0, b1) = ((first / 8) as usize, (last / 8) as usize);
-        for c in first..=last {
-            bits[(c / 8) as usize] |= 1 << (c % 8);
-        }
-        pwrite(&self.map, &bits[b0..=b1], HEADER + b0 as u64)
+        self.write_locked(&mut self.bits.lock().unwrap(), buf, off)
     }
 
     fn flush(&self) -> io::Result<()> {
         self.overlay.sync_data()?;
         self.map.sync_data()
+    }
+
+    fn can_discard(&self) -> bool {
+        self.can_discard
+    }
+
+    fn discard(&self, off: u64, len: u64) -> io::Result<()> {
+        check(!self.read_only, "the disk is read-only")?;
+        check(off.checked_add(len).is_some_and(|end| end <= self.size), "discard past the end of the disk")?;
+        if len == 0 {
+            return Ok(());
+        }
+        let end = off + len;
+        // The chunks wholly inside the range. The end of the disk closes a short last chunk.
+        let first = off.div_ceil(CHUNK);
+        let stop = if end == self.size { self.size.div_ceil(CHUNK) } else { end / CHUNK };
+        let mut bits = self.bits.lock().unwrap();
+        // What's left at either end is part of a chunk: zeroes written like any other write,
+        // copying the rest of the chunk up. A range inside one chunk, or across the boundary
+        // of two, is all left over.
+        let parts = if first < stop {
+            let (from, to) = (first * CHUNK, (stop * CHUNK).min(self.size));
+            // The hole first: until the bit is set, a chunk that wasn't in the overlay still
+            // reads from the base, so a crash in between leaves it untouched.
+            punch_hole(&self.overlay, from, to - from)?;
+            self.set_bits(&mut bits, first, stop - 1)?;
+            [(off, from), (to, end)]
+        } else {
+            [(off, end), (end, end)]
+        };
+        for (from, to) in parts {
+            if from < to {
+                self.write_locked(&mut bits, &vec![0u8; (to - from) as usize], from)?;
+            }
+        }
+        Ok(())
     }
 }
 

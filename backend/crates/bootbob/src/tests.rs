@@ -816,6 +816,128 @@ fn fat_disk_at(dir: &std::path::Path, name: &str) {
     std::fs::write(dir.join(name), disk.into_inner()).unwrap();
 }
 
+/// Just enough of an NBD client to send one TRIM down a real socket and read the result.
+struct NbdClient(tokio::net::TcpStream);
+
+impl NbdClient {
+    /// Connects, and returns the client with the export's transmission flags.
+    async fn go(addr: SocketAddr, export: &str) -> (NbdClient, u16) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.read_exact(&mut [0u8; 18]).await.unwrap();
+        s.write_u32(3).await.unwrap(); // fixed newstyle, no zeroes
+        s.write_u64(0x4948_4156_454f_5054).await.unwrap();
+        s.write_u32(7).await.unwrap(); // OPT_GO
+        s.write_u32(6 + export.len() as u32).await.unwrap();
+        s.write_u32(export.len() as u32).await.unwrap();
+        s.write_all(export.as_bytes()).await.unwrap();
+        s.write_u16(0).await.unwrap();
+        let mut flags = None;
+        loop {
+            s.read_exact(&mut [0u8; 12]).await.unwrap();
+            let kind = s.read_u32().await.unwrap();
+            let mut data = vec![0u8; s.read_u32().await.unwrap() as usize];
+            s.read_exact(&mut data).await.unwrap();
+            match kind {
+                1 => return (NbdClient(s), flags.expect("the export's flags")),
+                3 if data[..2] == [0, 0] => flags = Some(u16::from_be_bytes([data[10], data[11]])),
+                3 => {}
+                _ => panic!("refused: {}", String::from_utf8_lossy(&data)),
+            }
+        }
+    }
+
+    /// Sends a request; a read's reply data comes back.
+    async fn request(&mut self, cmd: u16, offset: u64, len: u32) -> Vec<u8> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        self.0.write_u32(0x2560_9513).await.unwrap();
+        self.0.write_u16(0).await.unwrap();
+        self.0.write_u16(cmd).await.unwrap();
+        self.0.write_u64(7).await.unwrap();
+        self.0.write_u64(offset).await.unwrap();
+        self.0.write_u32(len).await.unwrap();
+        self.0.read_exact(&mut [0u8; 4]).await.unwrap();
+        assert_eq!(self.0.read_u32().await.unwrap(), 0, "the request failed");
+        self.0.read_exact(&mut [0u8; 8]).await.unwrap();
+        let mut data = vec![0u8; if cmd == 0 { len as usize } else { 0 }];
+        self.0.read_exact(&mut data).await.unwrap();
+        data
+    }
+}
+
+/// TRIM on a store, for both kinds of disk, through a real connection and the same policy
+/// a machine goes through: the store asks the main server, and the file it works on is the
+/// store's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_trims_plain_disks_and_overlays() {
+    const CMD_READ: u16 = 0;
+    const CMD_TRIM: u16 = 4;
+    const SEND_TRIM: u16 = 32;
+    let main_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let store_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let main_url = format!("http://{}", main_l.local_addr().unwrap());
+    let store_url = format!("http://{}", store_l.local_addr().unwrap());
+    let dirs = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let ipxe = dirs.0.path().join("ipxe");
+    std::fs::create_dir_all(&ipxe).unwrap();
+    let store_config = crate::config::StoreConfig { name: "s1".into(), url: store_url, nbd_host: Some("10.255.0.3".into()) };
+    let main = Arc::new(
+        State::open(Config { data_dir: dirs.0.path().join("data"), ipxe_dir: ipxe, stores: vec![store_config], ..Config::default() })
+            .unwrap(),
+    );
+    let store = Arc::new(
+        State::open(Config {
+            data_dir: dirs.1.path().join("data"),
+            mode: crate::config::Mode::Store,
+            main_url: Some(main_url),
+            store_name: Some("s1".into()),
+            ..Config::default()
+        })
+        .unwrap(),
+    );
+    let images = store.config.images_dir();
+    std::fs::create_dir_all(&images).unwrap();
+    let sector = 1 << 20;
+    std::fs::write(images.join("golden.img"), vec![5u8; 2 << 20]).unwrap();
+    std::fs::write(images.join("plain.img"), vec![6u8; 2 << 20]).unwrap();
+    tokio::spawn(axum::serve(main_l, router(main.clone())).into_future());
+    tokio::spawn(axum::serve(store_l, crate::http::store_router(store.clone())).into_future());
+
+    let nbd_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nbd_addr = nbd_l.local_addr().unwrap();
+    let exports = Arc::new(crate::nbd::StoreExports { st: store.clone() });
+    tokio::spawn(bootbob_nbd::serve_with(nbd_l, exports, store.nbd_live.clone()));
+
+    let cmdline = "root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp";
+    for (image, source, cow) in [("cow", "s1:golden.img", true), ("plain", "s1:plain.img", false)] {
+        let img = json!({"title": image, "disk": {"source": source, "initrd": "initrd.img", "cmdline": cmdline, "cow": cow}});
+        let (s, body) = call(&main, Method::PUT, &format!("/api/images/{image}"), Some(img)).await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+    }
+    get(&main, &ident("")).await;
+    main.learn_address(Ipv4Addr::LOCALHOST, MAC.parse().unwrap());
+
+    for (image, disk, cow, was) in [("cow", "golden.img", true, 5u8), ("plain", "plain.img", false, 6u8)] {
+        let (s, body) = call(&main, Method::PUT, &format!("/api/devices/{MAC}/assignment"), Some(json!({"image": image}))).await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        let (mut c, flags) = NbdClient::go(nbd_addr, disk).await;
+        if cfg!(target_os = "linux") {
+            assert_ne!(flags & SEND_TRIM, 0, "{disk}");
+        } else {
+            continue;
+        }
+        assert_eq!(c.request(CMD_READ, sector, 4).await, vec![was; 4], "{disk}");
+        c.request(CMD_TRIM, sector, 8192).await;
+        assert_eq!(c.request(CMD_READ, sector, 4).await, vec![0; 4], "{disk}");
+        assert_eq!(c.request(CMD_READ, sector + 8192, 4).await, vec![was; 4], "{disk}");
+
+        let on_disk = std::fs::read(images.join(disk)).unwrap()[sector as usize];
+        assert_eq!(on_disk, if cow { was } else { 0 }, "{disk}: an overlay leaves the image alone");
+        // Answered, so the connection can end and the next machine can have its turn.
+        drop(c);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_store_serves_disks_the_main_server_decides_about() {
     use bootbob_cow::Disk;

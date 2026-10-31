@@ -107,13 +107,15 @@ impl Exports for Nbd {
 
     fn disconnected(&self, export: &Export, peer: SocketAddr, stats: Stats, why: &str) {
         crate::cache::touch(&self.st, &export.name);
-        let mb = |b: u64| b.div_ceil(1 << 20);
-        self.st.event(
-            self.mac(peer),
-            "nbd",
-            format!("Disk {} (NBD) {why}: read {} MB, wrote {} MB", export.name, mb(stats.read), mb(stats.written)),
-        );
+        self.st.event(self.mac(peer), "nbd", format!("Disk {} (NBD) {why}: {}", export.name, moved(&stats)));
     }
+}
+
+/// What a connection moved, for its last event.
+fn moved(s: &Stats) -> String {
+    let mb = |b: u64| b.div_ceil(1 << 20);
+    let trimmed = if s.trimmed > 0 { format!(", trimmed {} MB", mb(s.trimmed)) } else { String::new() };
+    format!("read {} MB, wrote {} MB{trimmed}", mb(s.read), mb(s.written))
 }
 
 /// A machine's copy-on-write overlay, for the UI.
@@ -273,12 +275,7 @@ impl Exports for StoreExports {
 
     fn disconnected(&self, export: &Export, peer: SocketAddr, stats: Stats, why: &str) {
         crate::cache::touch(&self.st, &export.name);
-        let mb = |b: u64| b.div_ceil(1 << 20);
-        self.st.event(
-            None,
-            "nbd",
-            format!("{} on disk {} (NBD) {why}: read {} MB, wrote {} MB", peer.ip(), export.name, mb(stats.read), mb(stats.written)),
-        );
+        self.st.event(None, "nbd", format!("{} on disk {} (NBD) {why}: {}", peer.ip(), export.name, moved(&stats)));
     }
 }
 

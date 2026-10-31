@@ -9,10 +9,9 @@ is lost and the root stays read-write. A normal restart no longer does this, bec
 server answers what it was sent before it exits (`Live::drain`); a killed or crashed
 server still does.
 
-A shorter timeout isn't free. It would make the kernel reconnect during a slow request,
-and the old connection's write can still be running, so it could land after a newer write
-to the same block. `connection()` would have to wait for it before the export is claimed
-again, and the timeout is baked into each image's initramfs.
+A shorter timeout isn't free: it would make the kernel reconnect during any slow request,
+which then waits for the old connection to finish, and the timeout is baked into each image's
+initramfs.
 
 ## Stock images can't run their root over NBD
 
@@ -29,15 +28,3 @@ from the catalogue, on a Pi" looks like it should work, and is what people will 
 `sparse::not_a_disk` refuses them with a clear message. That rules out Ubuntu's cloud images
 (`.img` that is really qcow2) and about half of the third-party images in Raspberry Pi's list
 (`.zip`; `catalogue::parse_pi_os` leaves them out). Debian's `.raw` and Pi OS's `.img.xz` work.
-
-## Disks and overlays never give space back: the NBD server has no TRIM
-
-**In progress: TRIM thread (DeskyPi `plans/pxe-netboot.md`).**
-
-Exported disks are sparse, but only until a block is written. The server doesn't offer
-`NBD_CMD_TRIM`, so on desky `/sys/block/nbd0/queue/discard_max_bytes` is 0, and `fstrim` can't
-reclaim anything even though `fstrim.timer` is enabled. Seen 2026-10-31: `desky.img` is 32 GiB
-long and 11 GiB on disk, with 9.8 GiB in use. Deleted files stay allocated, so a device's
-space only ever grows towards its full length. Copy-on-write overlays have the same problem,
-and there a trimmed block can't just become a hole, because that would show the base image's
-data again.

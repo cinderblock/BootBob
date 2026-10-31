@@ -95,6 +95,19 @@ machine has written and can reset it to the pristine image (not while it's runni
 it). Replacing the image file with one of a different size invalidates the overlays made
 over it; reset them.
 
+**Giving space back.** Disks are sparse, and `fstrim` on a machine (or the `discard` mount
+option) gives deleted files' space back to the server, on the main server and on stores,
+through the same NBD connection. On a plain disk a trimmed range becomes a hole in the file.
+In a copy-on-write overlay it reads as zeroes, not as the image underneath, and the overlay
+lets go of the space. Overlays made before this works need nothing done to them.
+
+It needs Linux, and a filesystem with holes under the disk (ext4, XFS, Btrfs and tmpfs all
+have them); elsewhere BootBob doesn't offer it, and the rest works as usual. Machines need no
+new client or image, but a machine sees the feature when it connects, so one that's
+already running needs a reboot after the upgrade. Check with
+`cat /sys/block/nbd0/queue/discard_max_bytes`: anything but 0 means it's on.
+`tools/test-trim.sh` proves it all on a real kernel.
+
 Every file of one boot comes from the image it started with, so a "next boot only"
 assignment lasts the whole boot. A Pi with nothing to boot gets nothing, keeps asking, and
 shows up in the web UI as waiting.
@@ -259,7 +272,7 @@ Without a config, BootBob serves HTTP on `:8067` and TFTP on `:69` from `./data`
 | `web/` | The web UI: Preact (via preact/compat), Vite, TypeScript, Bun |
 | `ipxe/` | iPXE build: pinned commit, embedded script, build options |
 | `e2e/` | End-to-end test: SeaBIOS and OVMF VMs netboot from BootBob in QEMU |
-| `tools/` | `pi-clone-to-nbd.sh`: clone a running Pi onto a BootBob NBD disk, to run it diskless. `make-pc-golden.sh`: build a Debian disk image a PC runs from over the network. `make-pi-golden.sh`: the same for Raspberry Pis, from packages (CI builds it, boots it in a VM with `test-pi-golden.sh`, and keeps it as an artifact) |
+| `tools/` | `pi-clone-to-nbd.sh`: clone a running Pi onto a BootBob NBD disk, to run it diskless. `make-pc-golden.sh`: build a Debian disk image a PC runs from over the network. `make-pi-golden.sh`: the same for Raspberry Pis, from packages (CI builds it, boots it in a VM with `test-pi-golden.sh`, and keeps it as an artifact). `test-trim.sh`: proves TRIM on a real kernel, in a throwaway container |
 
 ## Development
 
