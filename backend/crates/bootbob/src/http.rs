@@ -3,7 +3,7 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State as Ax};
+use axum::extract::{ConnectInfo, Path, Query, State as Ax};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::services::{ServeDir, ServeFile};
 
+use crate::catalogue::Hold;
 use crate::model::*;
 use crate::state::{State, describe};
 use crate::tftp::PI_FIRMWARE;
@@ -40,12 +41,20 @@ pub fn router(st: St) -> Router {
         .route("/api/store/allow", get(store_allow))
         .route("/api/disks", axum::routing::post(create_disk))
         .route("/api/disks/{name}", put(upload_disk).delete(delete_disk))
+        .route("/api/catalogue", get(list_catalogue))
+        .route("/api/catalogue/pi-os", get(pi_os))
+        .route("/api/catalogue/{id}", put(put_catalogue).delete(delete_catalogue))
+        .route("/api/catalogue/{id}/fetch", axum::routing::post(fetch_catalogue))
+        .route("/api/cache", get(list_cache))
+        .route("/api/cache/{name}", axum::routing::post(ensure_cache).delete(remove_cache))
+        .route("/api/cache/{name}/pin", put(pin_cache))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/events", get(list_events))
         .route("/api/doctor", get(last_report).post(run_doctor))
         .route("/api/stream", get(stream))
         .route("/theme.css", get(theme_css))
         .nest_service("/files/ipxe", ServeDir::new(&st.config.ipxe_dir))
+        .nest_service("/files/cache", ServeDir::new(crate::cache::files_dir(&st)))
         .nest_service("/files/tools", ServeDir::new(st.config.tools_dir()));
     r = match st.config.web_dir.clone().filter(|d| d.join("index.html").exists()) {
         Some(dir) => r.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
@@ -146,6 +155,12 @@ fn record_identity(st: &State, mac: Mac, q: &Identity) -> Device {
 
 /// The fallback menu for `dev`. `poll` makes it check back for an assignment.
 fn menu_script(st: &State, dev: &Device, base: String, status_line: String, poll: bool) -> String {
+    let poll_secs = if poll { st.settings().poll_secs } else { 0 };
+    menu_with(st, dev, base, status_line, poll_secs, None)
+}
+
+/// [`menu_script`], checking back every `poll_secs`, at `refresh` if that's given.
+fn menu_with(st: &State, dev: &Device, base: String, status_line: String, poll_secs: u32, refresh: Option<String>) -> String {
     let settings = st.settings();
     let mut groups: Vec<(String, Vec<MenuItem>)> = Vec::new();
     for img in st.images() {
@@ -164,10 +179,42 @@ fn menu_script(st: &State, dev: &Device, base: String, status_line: String, poll
         title: "BootBob".into(),
         device_line: format!("This is {}{ip}", describe(dev)),
         status_line,
-        poll_secs: if poll { settings.poll_secs } else { 0 },
+        poll_secs,
+        refresh,
         groups,
         theme: settings.theme.menu_theme(),
     })
+}
+
+/// How often a machine waiting for a download checks back. Each check is instant: iPXE gives
+/// up on a silent connection after 120 s, so a boot is never held by not answering.
+const WAIT_POLL_SECS: u32 = 5;
+
+/// Whether a PC can boot `image` yet. `Some`: the script to answer with instead. `refresh`
+/// is where it should check back, if not `/boot/ipxe`.
+async fn held(st: &St, mac: Mac, dev: &Device, image: &Image, base: &str, refresh: Option<String>) -> Option<String> {
+    let entries = crate::catalogue::for_pc(st, image);
+    if entries.is_empty() {
+        return None;
+    }
+    let st2 = st.clone();
+    let hold = tokio::task::spawn_blocking(move || crate::catalogue::hold(&st2, &entries)).await;
+    match hold.unwrap_or_else(|e| Hold::Failed(e.to_string())) {
+        Hold::Go => None,
+        Hold::Wait(detail) => {
+            st.note_waiting(mac, &image.id, &detail);
+            let status = format!("Waiting to boot {}\n{detail}\nIt boots by itself once that's done.", image.title);
+            Some(menu_with(st, dev, base.to_string(), status, WAIT_POLL_SECS, refresh))
+        }
+        Hold::Failed(why) => {
+            let first = dev.waiting.is_some() || !dev.last_script.is_some_and(|t| now_ms().saturating_sub(t) < 60_000);
+            st.clear_waiting(mac);
+            if first {
+                st.event(Some(mac), "error", format!("Can't boot {}: {why}", image.title));
+            }
+            Some(menu_script(st, dev, base.to_string(), format!("Can't boot {}.\n{why}", image.title), true))
+        }
+    }
 }
 
 /// `95 s` → `about 2 min`; under a minute, seconds.
@@ -240,6 +287,11 @@ async fn boot_ipxe(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>
         return ipxe(menu_script(&st, &dev, base, status, true));
     }
 
+    if let Some(i) = st.image(&res.image)
+        && let Some(script) = held(&st, mac, &dev, &i, &base, None).await
+    {
+        return ipxe(script);
+    }
     let Some(action) = st.image(&res.image).and_then(|i| pc_action(&st, &i, mac, &base)) else {
         let why = match st.image(&res.image) {
             Some(i) if i.pi.is_some() => format!(
@@ -274,7 +326,7 @@ fn nbd_server(st: &State, base: &str) -> String {
 /// when it has one) with the command line filled in. `None`: nothing for PCs.
 pub(crate) fn pc_action(st: &State, img: &Image, mac: Mac, base: &str) -> Option<bootbob_ipxe::Action> {
     if let Some(a) = &img.action {
-        return Some(a.clone());
+        return Some(crate::catalogue::fill(st, a, base));
     }
     let d = img.disk.as_ref()?;
     let m = mac.0;
@@ -343,6 +395,12 @@ async fn boot_chose(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity
     };
     let dev = record_identity(&st, mac, &q);
     let item = q.item.unwrap_or_default();
+    if let Some(i) = st.image(&item) {
+        let again = format!("/boot/ipxe/chose?${{bootbob-id}}&item={item}");
+        if let Some(script) = held(&st, mac, &dev, &i, &base, Some(again)).await {
+            return ipxe(script);
+        }
+    }
     match st.image(&item).and_then(|i| pc_action(&st, &i, mac, &base).map(|a| (i.title, a))) {
         Some((title, action)) => {
             st.record_boot(mac, &item, "chosen at the menu", false);
@@ -389,7 +447,7 @@ pub struct DeviceView {
     #[serde(flatten)]
     device: Device,
     pub(crate) code: String,
-    /// `at_menu`, `menu_idle`, `pi_waiting`, `stuck`, `booted` or `seen`.
+    /// `fetching`, `at_menu`, `menu_idle`, `pi_waiting`, `stuck`, `booted` or `seen`.
     pub(crate) state: &'static str,
     summary: String,
     /// What it would get if it netbooted now.
@@ -408,7 +466,12 @@ pub fn view(st: &State, d: Device) -> DeviceView {
     let poll_ms = st.settings().poll_secs as u64 * 1000;
     let contact = d.last_script.unwrap_or(0).max(d.tftp.as_ref().map(|t| t.at).unwrap_or(0));
     let is_pi = d.firmware.as_deref() == Some(PI_FIRMWARE);
-    let (state, summary) = if is_pi && d.pi_session.is_none() && d.tftp.as_ref().is_some_and(|t| now.saturating_sub(t.at) < 300_000) {
+    // A machine still asking: a Pi's retries come well inside this.
+    let waiting = d.waiting.as_ref().filter(|w| now.saturating_sub(w.last) < 120_000);
+    let (state, summary) = if let Some(w) = waiting {
+        let title = st.image(&w.image).map(|i| i.title).unwrap_or_else(|| w.image.clone());
+        ("fetching", format!("Waiting to boot {title}. {}", w.detail.replace('\n', ", ")))
+    } else if is_pi && d.pi_session.is_none() && d.tftp.as_ref().is_some_and(|t| now.saturating_sub(t.at) < 300_000) {
         ("pi_waiting", "A Raspberry Pi asking to netboot, with no Pi image to give it".to_string())
     } else if let Some(m) = &d.menu {
         if now.saturating_sub(m.last_poll) <= poll_ms * 5 / 2 + 2000 {
@@ -590,6 +653,12 @@ pub fn store_router(st: St) -> Router {
         .route("/store/boot/{disk}/{*path}", get(store_boot_file))
         .route("/api/overlays/{mac}", get(store_overlays))
         .route("/api/overlays/{mac}/{disk}", axum::routing::delete(store_reset_overlay))
+        .route("/api/cache", get(list_cache))
+        .route("/api/cache/{name}", axum::routing::post(ensure_cache).delete(remove_cache))
+        .route("/api/cache/{name}/pin", put(pin_cache))
+        .route("/store/digest/{disk}", get(store_digest))
+        .route("/store/disk/{disk}", get(store_disk))
+        .nest_service("/files/cache", ServeDir::new(crate::cache::files_dir(&st)))
         .with_state(st)
 }
 
@@ -686,9 +755,9 @@ async fn create_disk(Ax(st): Ax<St>, Json(d): Json<NewDisk>) -> Result<StatusCod
 /// zstd compressed with `Content-Encoding: zstd`). Never overwrites one.
 async fn upload_disk(Ax(st): Ax<St>, Path(name): Path<String>, headers: HeaderMap, body: axum::body::Body) -> Result<StatusCode, ApiError> {
     crate::nbd::check_disk_name(&name).map_err(bad)?;
-    let zstd = match headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes()) {
-        None | Some(b"identity") => false,
-        Some(b"zstd") => true,
+    let packing = match headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes()) {
+        None | Some(b"identity") => crate::sparse::Packing::Raw,
+        Some(b"zstd") => crate::sparse::Packing::Zstd,
         Some(other) => {
             let other = String::from_utf8_lossy(other);
             return Err(ApiError(StatusCode::UNSUPPORTED_MEDIA_TYPE, format!("an upload can be zstd compressed, not {other}")));
@@ -703,7 +772,7 @@ async fn upload_disk(Ax(st): Ax<St>, Path(name): Path<String>, headers: HeaderMa
     let src = tokio_util::io::StreamReader::new(body.into_data_stream().map(|c| c.map_err(std::io::Error::other)));
     let src = tokio_util::io::SyncIoBridge::new(src);
     let to = tmp.clone();
-    let res = tokio::task::spawn_blocking(move || crate::sparse::receive(src, zstd, &to)).await;
+    let res = tokio::task::spawn_blocking(move || crate::sparse::receive(src, packing, &to)).await;
     let res = res.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| format!("can't store {name}: {e}")));
     let n = match res {
         Ok(0) => Err("the upload was empty".to_string()),
@@ -733,6 +802,171 @@ async fn delete_disk(Ax(st): Ax<St>, Path(name): Path<String>) -> Result<StatusC
 async fn delete_image(Ax(st): Ax<St>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     st.delete_image(&id).map_err(bad)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- The catalogue and the cache ----
+
+async fn list_catalogue(Ax(st): Ax<St>) -> Result<Json<crate::catalogue::Overview>, ApiError> {
+    tokio::task::spawn_blocking(move || crate::catalogue::overview(&st))
+        .await
+        .map(Json)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Raspberry Pi's own image list, for adding entries from.
+async fn pi_os() -> Result<Json<Vec<crate::catalogue::PiOsImage>>, ApiError> {
+    match tokio::task::spawn_blocking(crate::catalogue::pi_os_images).await {
+        Ok(Ok(v)) => Ok(Json(v)),
+        Ok(Err(e)) => Err(ApiError(StatusCode::BAD_GATEWAY, e)),
+        Err(e) => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn put_catalogue(
+    Ax(st): Ax<St>,
+    Path(id): Path<String>,
+    Json(mut e): Json<crate::catalogue::Entry>,
+) -> Result<Json<crate::catalogue::Entry>, ApiError> {
+    e.id = id;
+    e.title = e.title.trim().to_string();
+    e.added_at = st.catalogue_entry(&e.id).map_or_else(now_ms, |old| old.added_at);
+    crate::catalogue::validate(&st, &e).map_err(bad)?;
+    if let Some(old) = st.catalogue_entry(&e.id)
+        && old.store != e.store
+    {
+        return Err(bad("an entry can't move to another store; delete it and add it again"));
+    }
+    st.put_catalogue_entry(e.clone()).map_err(bad)?;
+    let (st2, e2) = (st.clone(), e.clone());
+    tokio::task::spawn_blocking(move || match &e2.store {
+        None => {
+            crate::cache::pin(&st2, &e2.id, e2.pinned);
+            Ok(())
+        }
+        Some(name) => st2.config.stores.iter().find(|s| &s.name == name).map_or(Ok(()), |s| crate::stores::cache_pin(s, &e2.id, e2.pinned)),
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(e))
+}
+
+/// Deletes an entry and its cached file. Refused while an image boots it.
+async fn delete_catalogue(Ax(st): Ax<St>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    let e = st.catalogue_entry(&id).ok_or_else(|| not_found("catalogue entry"))?;
+    let users = st.catalogue_users(&e);
+    if !users.is_empty() {
+        return Err(ApiError(StatusCode::CONFLICT, format!("{id} is used by image(s) {}", users.join(", "))));
+    }
+    let st2 = st.clone();
+    let removed = tokio::task::spawn_blocking(move || match &e.store {
+        None => crate::cache::remove(&st2, &e.id),
+        Some(name) => match st2.config.stores.iter().find(|s| &s.name == name) {
+            Some(s) => crate::stores::cache_remove(s, &e.id),
+            None => Ok(false),
+        },
+    })
+    .await
+    .unwrap_or_else(|e| Err((500, e.to_string())));
+    removed.map_err(|(code, msg)| ApiError(StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), msg))?;
+    st.delete_catalogue_entry(&id).map_err(bad)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Fetches an entry now, without a machine waiting, or tries a failed one again.
+async fn fetch_catalogue(Ax(st): Ax<St>, Path(id): Path<String>) -> Result<Json<crate::cache::Status>, ApiError> {
+    let e = st.catalogue_entry(&id).ok_or_else(|| not_found("catalogue entry"))?;
+    tokio::task::spawn_blocking(move || crate::catalogue::ensure(&st, &e, true))
+        .await
+        .map(Json)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn list_cache(Ax(st): Ax<St>) -> Result<Json<crate::cache::Listing>, ApiError> {
+    tokio::task::spawn_blocking(move || crate::cache::list(&st))
+        .await
+        .map(Json)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// The main server telling this host to have a file (a store's half of `ensure`).
+async fn ensure_cache(
+    Ax(st): Ax<St>,
+    Path(name): Path<String>,
+    Json(want): Json<crate::cache::Want>,
+) -> Result<Json<crate::cache::Status>, ApiError> {
+    tokio::task::spawn_blocking(move || crate::cache::ensure(&st, &name, &want))
+        .await
+        .map(Json)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn remove_cache(Ax(st): Ax<St>, Path(name): Path<String>) -> Result<StatusCode, ApiError> {
+    crate::cache::check_name(&name).map_err(bad)?;
+    let r = tokio::task::spawn_blocking(move || crate::cache::remove(&st, &name)).await.unwrap_or_else(|e| Err((500, e.to_string())));
+    match r {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(not_found("cached file")),
+        Err((code, msg)) => Err(ApiError(StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), msg)),
+    }
+}
+
+#[derive(Deserialize)]
+struct Pin {
+    pinned: bool,
+}
+
+async fn pin_cache(Ax(st): Ax<St>, Path(name): Path<String>, Json(p): Json<Pin>) -> Result<StatusCode, ApiError> {
+    if crate::cache::pin(&st, &name, p.pinned) { Ok(StatusCode::NO_CONTENT) } else { Err(not_found("cached file")) }
+}
+
+/// Whether `peer` is the main server: only it may read a whole disk. A disk here can be a
+/// machine's root, and NBD's check (`/api/store/allow`) is what normally guards those.
+fn from_main(st: &State, peer: std::net::SocketAddr) -> bool {
+    let host = st.config.main_url.as_deref().and_then(|u| u.split("://").nth(1)).and_then(|h| h.split(['/', ':']).next());
+    host.is_some_and(|h| h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip == peer.ip().to_canonical()))
+}
+
+/// A disk this store has, that nothing is connected to: `(path)`, or the refusal.
+fn whole_disk(st: &State, peer: std::net::SocketAddr, disk: &str) -> Result<std::path::PathBuf, ApiError> {
+    if !from_main(st, peer) {
+        return Err(ApiError(StatusCode::FORBIDDEN, "only the main server may read a whole disk".into()));
+    }
+    crate::nbd::check_disk_name(disk).map_err(bad)?;
+    let path = st.config.images_dir().join(disk);
+    if !path.is_file() {
+        return Err(not_found("disk image"));
+    }
+    if st.nbd_live.in_use(&path) {
+        return Err(ApiError(StatusCode::CONFLICT, format!("{disk} is in use over NBD")));
+    }
+    Ok(path)
+}
+
+/// The SHA-256 of a disk, which the main server checks its copy against (tiering).
+async fn store_digest(
+    Ax(st): Ax<St>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Path(disk): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let path = whole_disk(&st, peer, &disk)?;
+    match tokio::task::spawn_blocking(move || crate::fetch::sha256_file(&path)).await {
+        Ok(Ok(sha256)) => Ok(Json(serde_json::json!({ "sha256": sha256 }))),
+        Ok(Err(e)) => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Err(e) => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+/// A whole disk, with ranges, for the main server to keep a copy of (tiering).
+async fn store_disk(
+    Ax(st): Ax<St>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Path(disk): Path<String>,
+    req: axum::extract::Request,
+) -> Result<Response, ApiError> {
+    let path = whole_disk(&st, peer, &disk)?;
+    let res = tower::ServiceExt::oneshot(ServeFile::new(path), req).await;
+    res.map(IntoResponse::into_response).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn get_settings(Ax(st): Ax<St>) -> Json<Settings> {

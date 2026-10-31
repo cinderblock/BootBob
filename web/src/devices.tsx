@@ -4,6 +4,7 @@ import type { Live } from "./live";
 import { ago, fullTime } from "./time";
 
 const stateLabel: Record<Device["state"], string> = {
+  fetching: "waiting for a download",
   at_menu: "waiting at menu",
   menu_idle: "at menu, idle",
   pi_waiting: "Pi, nothing to boot",

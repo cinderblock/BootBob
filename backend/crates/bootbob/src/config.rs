@@ -65,6 +65,10 @@ pub struct Config {
     pub store_name: Option<String>,
     /// The main server's image stores. An image's source `<store>:<disk>.img` lives there.
     pub stores: Vec<StoreConfig>,
+    /// The most disk space, in GiB, files fetched from the catalogue may take on this host.
+    /// Past it the least recently used ones go. Disks uploaded or made by hand don't count
+    /// and are never touched.
+    pub cache_gib: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -119,6 +123,7 @@ impl Default for Config {
             main_url: None,
             store_name: None,
             stores: Vec::new(),
+            cache_gib: 150,
         }
     }
 }

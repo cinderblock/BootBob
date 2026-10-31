@@ -100,11 +100,13 @@ impl Exports for Nbd {
     }
 
     fn connected(&self, export: &Export, peer: SocketAddr) {
+        crate::cache::touch(&self.st, &export.name);
         let how = if export.overlay.is_some() { ", through its own overlay" } else { "" };
         self.st.event(self.mac(peer), "nbd", format!("Connected to disk {} (NBD{how})", export.name));
     }
 
     fn disconnected(&self, export: &Export, peer: SocketAddr, stats: Stats, why: &str) {
+        crate::cache::touch(&self.st, &export.name);
         let mb = |b: u64| b.div_ceil(1 << 20);
         self.st.event(
             self.mac(peer),
@@ -219,6 +221,7 @@ pub fn delete_disk(st: &State, name: &str) -> Result<(), (u16, String)> {
         }
     }
     std::fs::remove_file(&path).map_err(|e| (500, format!("can't delete {name}: {e}")))?;
+    st.delete_cache_row(name);
     st.event(None, "disk", format!("Deleted disk {name} and its overlays"));
     Ok(())
 }
@@ -264,10 +267,12 @@ impl Exports for StoreExports {
     }
 
     fn connected(&self, export: &Export, peer: SocketAddr) {
+        crate::cache::touch(&self.st, &export.name);
         self.st.event(None, "nbd", format!("{} connected to disk {} (NBD)", peer.ip(), export.name));
     }
 
     fn disconnected(&self, export: &Export, peer: SocketAddr, stats: Stats, why: &str) {
+        crate::cache::touch(&self.st, &export.name);
         let mb = |b: u64| b.div_ceil(1 << 20);
         self.st.event(
             None,

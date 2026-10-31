@@ -41,6 +41,18 @@ pub struct Device {
     /// A Raspberry Pi's boot in progress: the image it started with, so every file of one
     /// boot comes from the same image even if the assignment changes (or was one-shot).
     pub pi_session: Option<PiSession>,
+    /// Its boot is held until a catalogue file has arrived.
+    pub waiting: Option<Waiting>,
+}
+
+/// A boot held for a download.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Waiting {
+    pub image: String,
+    pub since: Millis,
+    /// The last time it asked.
+    pub last: Millis,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,7 +153,8 @@ pub struct Image {
 /// holds a FAT boot partition (kernel, initrd) and the root filesystem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskBoot {
-    /// A disk image (`.img`) in the images directory.
+    /// A disk image (`.img`) in the images directory, on a store (`<store>:<disk>.img`), or
+    /// a catalogue entry that says how to fetch one. Must be copy-on-write if it's that.
     pub source: String,
     /// The kernel, a path in the boot partition.
     #[serde(default = "default_kernel")]
@@ -166,8 +179,8 @@ fn default_kernel() -> String {
 /// A Raspberry Pi boot tree, served over TFTP to the Pis assigned it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PiBoot {
-    /// A directory or a disk image (`.img`) in the images directory, relative to it. A
-    /// disk image's FAT boot partition is read in place.
+    /// A directory or a disk image (`.img`) in the images directory, relative to it, on a
+    /// store, or a catalogue entry. A disk image's FAT boot partition is read in place.
     pub source: String,
     /// Replaces the tree's `cmdline.txt`. `{serial}`, `{mac}`, `{ip}` and `{server}` are
     /// filled in per Pi. Empty: the tree's own.

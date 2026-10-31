@@ -3,8 +3,11 @@
 //! `bootbob [--config <file>]` (or `BOOTBOB_CONFIG`). With no config, it serves HTTP on
 //! :8067 and TFTP on :69 from `./data` and `./ipxe`, with the DHCP listener off.
 
+mod cache;
+mod catalogue;
 mod config;
 mod doctor;
+mod fetch;
 mod http;
 mod mdns;
 mod model;
@@ -66,7 +69,9 @@ async fn store(config: Config, st: Arc<State>) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.http).await.with_context(|| format!("HTTP: can't listen on {}", config.http))?;
     tracing::info!(addr = %config.http, "store: HTTP listening");
     let live = st.nbd_live.clone();
-    axum::serve(listener, http::store_router(st)).with_graceful_shutdown(shutdown_signal(live)).await?;
+    // The peer's address decides who may read a whole disk (`http::store_disk`).
+    let app = http::store_router(st).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(live)).await?;
     Ok(())
 }
 
@@ -96,6 +101,8 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(config_path()?.as_deref())?;
     let st = Arc::new(State::open(config.clone()).context("opening the database")?);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %config.data_dir.display(), mode = ?config.mode, "BootBob starting");
+
+    cache::startup(&st);
 
     if config.mode == config::Mode::Store {
         return store(config, st).await;

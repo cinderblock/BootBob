@@ -78,6 +78,9 @@ pub struct Menu {
     pub status_line: String,
     /// How often to poll for an assignment. 0 disables polling.
     pub poll_secs: u32,
+    /// Where polling goes instead of `/boot/ipxe`, after `${bootbob}`: a machine waiting for
+    /// something it chose at the menu has to keep asking for that.
+    pub refresh: Option<String>,
     /// Extra entries (images from the catalogue), grouped. Built-in entries (local disk,
     /// shell, reboot, power off) are always added.
     pub groups: Vec<(String, Vec<MenuItem>)>,
@@ -175,7 +178,8 @@ pub fn menu(m: &Menu) -> String {
     s.push_str(":escaped\n");
     s.push_str("sleep 3 ||\n");
     s.push_str(":refresh\n");
-    s.push_str("chain --replace --autofree ${bootbob}/boot/ipxe?${bootbob-id}&poll=1 || goto unreachable\n");
+    let refresh = m.refresh.as_deref().unwrap_or("/boot/ipxe?${bootbob-id}&poll=1");
+    let _ = writeln!(s, "chain --replace --autofree ${{bootbob}}{refresh} || goto unreachable");
 
     // Built-ins report the choice, and fall back to doing it locally.
     for (id, fallback) in [
@@ -264,6 +268,7 @@ mod tests {
             device_line: "Device 12ab34 (bench-pc) at 10.255.7.9".into(),
             status_line: "No image assigned: pick one here or in the web UI".into(),
             poll_secs: 10,
+            refresh: None,
             groups: vec![("Tools".into(), vec![MenuItem { id: "netboot.xyz".into(), title: "netboot.xyz".into() }])],
             theme: Some(MenuTheme { background: 0x101418, text: 0xe6e6e6, accent: 0x4fa3ff, muted: 0x7a8794 }),
         }
@@ -318,6 +323,15 @@ mod tests {
                 assert!(labels.contains(&id), "item {id} has no label");
             }
         }
+    }
+
+    #[test]
+    fn polling_can_keep_asking_for_a_choice() {
+        let s = menu(&Menu { refresh: Some("/boot/ipxe/chose?${bootbob-id}&item=x".into()), ..sample() });
+        assert!(
+            s.contains(":refresh\nchain --replace --autofree ${bootbob}/boot/ipxe/chose?${bootbob-id}&item=x || goto unreachable\n"),
+            "{s}"
+        );
     }
 
     #[test]

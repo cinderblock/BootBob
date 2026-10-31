@@ -8,7 +8,8 @@ from the browser while they wait. BootBob is BenchBob's sibling
 **Status: early (Phase 2 of the plan).** PCs (legacy BIOS and UEFI) netboot into BootBob's
 iPXE and its fallback menu, and can be assigned images from the web UI. Raspberry Pis
 netboot natively from boot trees and disk images. Network roots, installers,
-backup/restore and the controller image come in later phases. The design and plan live in DeskyPi's
+backup/restore and the controller image come in later phases. Images can come from a
+catalogue of upstream URLs, fetched and verified on first use. The design and plan live in DeskyPi's
 [`plans/pxe-netboot.md`](https://github.com/cinderblock/DeskyPi/blob/master/plans/pxe-netboot.md).
 
 ## How it fits on a network
@@ -151,6 +152,70 @@ http = "10.255.0.3:8068"
 nbd = "10.255.0.3:10809"
 ```
 
+## The catalogue: images fetched when they're needed
+
+A **catalogue entry** is a URL and a checksum, and says which host keeps the file. An image
+can then name a file that isn't here yet. The first boot that needs it fetches it, and later
+boots use the cached copy, until the cache needs the room.
+
+```sh
+# A disk image: the id ends in .img, so it's unpacked (xz, gzip or zstd) into the images
+# directory, or the store's. Raspberry Pi publishes only the unpacked image's checksum.
+curl -X PUT -H 'content-type: application/json' http://<bootbob>:8067/api/catalogue/pios-lite.img -d '{
+  "title": "Raspberry Pi OS Lite", "store": "uberfall", "url": "https://downloads.raspberrypi.com/…/….img.xz",
+  "image_checksum": "sha256:b8a393dc…" }'
+
+# Any other file is kept byte for byte. An iPXE action names it {cached:<id>}.
+curl -X PUT -H 'content-type: application/json' http://<bootbob>:8067/api/catalogue/debian-linux -d '{
+  "title": "Debian installer kernel", "url": "https://deb.debian.org/…/linux", "checksum": "sha256:2b2358b3…" }'
+curl -X PUT -H 'content-type: application/json' http://<bootbob>:8067/api/images/debian-installer -d '{
+  "title": "Debian installer", "group": "Installers",
+  "action": {"kind": "kernel", "kernel": "{cached:debian-linux}", "initrds": ["{cached:debian-initrd.gz}"]} }'
+```
+
+**A boot is held until the file is whole and verified.** Nothing unverified ever reaches a
+machine, and there's no serving while downloading: NBD reads are random, a compressed image
+can only be read in order, and a kernel reads both ends of its disk in its first seconds.
+
+- A **PC** waits at the fallback menu, which shows the progress and checks every 5 s, with
+  the usual ways out. It boots by itself when the file is ready. Waiting doesn't use up a
+  one-shot assignment.
+- A **Pi** is told the file isn't there, the way an unassigned Pi is. With a network-only
+  `BOOT_ORDER` its bootloader keeps trying, and gets its files once they're ready. With the
+  SD card in its boot order, it boots the card instead.
+
+Checksums are `sha256:<hex>` or `sha512:<hex>`, of the download (`checksum`), the unpacked
+disk image (`image_checksum`), or both. Packing is read from the file's first bytes, not its
+name. qcow2, zip and tar aren't raw disks and are refused: Ubuntu's cloud `.img` is qcow2.
+
+What happens when things go wrong:
+
+| What | What BootBob does |
+| --- | --- |
+| The download breaks off, or stalls | Carries on from where it got to, with `Range`. A server without `Range` starts again |
+| BootBob restarts | The part file stays; the download resumes the next time something asks |
+| The checksum doesn't match | Nothing is kept. If the download had been resumed, one clean retry; otherwise it stays failed until someone retries it in the UI, so polling machines can't burn bandwidth |
+| The network or upstream keeps failing | Tries again when asked, backing off from 1 minute to an hour |
+| Two machines want the same file | One download |
+| A disk is full, or the cache is | The fetch fails and says why, having evicted nothing it didn't have to |
+
+Each host keeps what it fetched up to `cache_gib` (default 150) and stops with 5 GiB free on
+the disk, dropping the least recently used files. It only ever touches files it fetched, so
+disks uploaded or made by hand are safe. It never evicts a **pinned** file, a disk a machine
+is connected to, a disk any machine has an overlay on (reset the overlays to free it), or
+anything used in the last 15 minutes. A disk from the catalogue must be copy-on-write, so
+the verified copy is never written.
+
+**On a store,** the store fetches over its own connection and manages its own cap. Machines
+fetch its non-disk files from it directly. **A store's disk can be cached here too:** a local
+entry with the URL `store:<store>/<disk>.img` copies it, verified against the digest the
+store computes. Only the main server's address may read a whole disk from a store.
+
+A stock Raspberry Pi OS image downloads, verifies and serves its boot files over TFTP, but
+its initramfs has no NBD client, so it can't run its root from the network as it is. The same
+goes for cloud images, which also keep their kernels off the FAT partition.
+`tools/make-pi-golden.sh` and `tools/make-pc-golden.sh` build images that can.
+
 ## A USB boot stick, and finding BootBob on the network
 
 `/files/usb/bootbob-usb.img` is a boot stick for this server: a small disk image with an
@@ -229,6 +294,11 @@ for throwaway VMs.
 | `GET /files/tools/…` | `bootbob-nbd-client-{x86_64,aarch64}` and its initramfs hook |
 | `GET /boot/disk/{image}/{file}?mac=…` | A file from a PC disk image's boot partition (what iPXE fetches) |
 | `POST /api/disks` | `{"name": "desky.img", "size": <bytes>}`: an empty disk image to fill over NBD |
+| `GET /api/catalogue`, `PUT/DELETE /api/catalogue/{id}` | What can be fetched on demand, with each host's cache use. An image using an entry keeps it from being deleted |
+| `POST /api/catalogue/{id}/fetch` | Fetch it now, or retry a failed fetch |
+| `GET /api/catalogue/pi-os` | Raspberry Pi's image list, as entries to add |
+| `GET /api/cache`, `POST/DELETE /api/cache/{name}`, `PUT /api/cache/{name}/pin` | One host's cache (the main server's and each store's) |
+| `GET /files/cache/{name}` | A cached file, with `Range` |
 | `GET /api/pi/sources` | Directories and disk images in the images directory, with the Pi boot files each has |
 | `GET/PUT /api/settings` | Default image (PCs and Pis), menu poll interval, theme |
 | `GET /api/events` | The log |

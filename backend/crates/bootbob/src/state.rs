@@ -18,11 +18,17 @@ use crate::store::{Store, Table};
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "what", rename_all = "snake_case")]
 pub enum Change {
-    Device { mac: String },
-    DeviceRemoved { mac: String },
+    Device {
+        mac: String,
+    },
+    DeviceRemoved {
+        mac: String,
+    },
     Images,
     Settings,
     Event,
+    /// The catalogue, or something in a cache, changed.
+    Catalogue,
 }
 
 /// Why a machine gets what it gets.
@@ -63,6 +69,9 @@ pub struct State {
     changes: broadcast::Sender<Change>,
     /// Which NBD exports are connected right now (shared with the NBD server).
     pub nbd_live: Arc<bootbob_nbd::Live>,
+    catalogue: RwLock<BTreeMap<String, crate::catalogue::Entry>>,
+    /// This host's downloads in progress.
+    pub cache: crate::cache::Cache,
 }
 
 impl State {
@@ -79,6 +88,7 @@ impl State {
             images.insert(b.id.clone(), b);
         }
         let settings = store.get::<Settings>(Table::Meta, "settings")?.unwrap_or_default();
+        let catalogue = store.all::<crate::catalogue::Entry>(Table::Catalogue)?.into_iter().map(|e| (e.id.clone(), e)).collect();
         let events = store.recent_events::<Event>(EVENTS_IN_MEMORY)?.into();
         let (changes, _) = broadcast::channel(256);
         Ok(State {
@@ -94,6 +104,8 @@ impl State {
             report: Mutex::new(None),
             changes,
             nbd_live: Arc::new(bootbob_nbd::Live::default()),
+            catalogue: RwLock::new(catalogue),
+            cache: Default::default(),
         })
     }
 
@@ -202,7 +214,7 @@ impl State {
             return Err("a PC boots either the iPXE action or the disk image, not both".into());
         }
         if let Some(d) = &image.disk {
-            crate::stores::locate(&self.config, &d.source)?;
+            self.check_source(&d.source, d.cow)?;
             if !d.source.ends_with(".img") {
                 return Err("a PC disk boot needs a disk image (.img)".into());
             }
@@ -210,8 +222,19 @@ impl State {
                 return Err("a PC disk boot needs the kernel's path in the boot partition".into());
             }
         }
+        if let Some(a) = &image.action {
+            for id in crate::catalogue::action_refs(a) {
+                match self.catalogue_entry(&id) {
+                    None => return Err(format!("{{cached:{id}}}: no such catalogue entry")),
+                    Some(_) if crate::cache::is_disk(&id) => {
+                        return Err(format!("{{cached:{id}}}: a disk image is a disk source, not a file to fetch"));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
         if let Some(pi) = &image.pi {
-            crate::stores::locate(&self.config, &pi.source)?;
+            self.check_source(&pi.source, pi.cow)?;
             if pi.cow && !pi.source.ends_with(".img") {
                 return Err("copy-on-write needs a disk image (.img) source, not a directory".into());
             }
@@ -220,6 +243,17 @@ impl State {
         self.images.write().unwrap().insert(image.id.clone(), Image { builtin: false, ..image });
         self.notify(Change::Images);
         Ok(())
+    }
+
+    /// A source has to exist, or be something the catalogue can fetch. A fetched disk is
+    /// never written: that's the copy every machine starts from, verified, and the cache
+    /// may delete it.
+    fn check_source(&self, source: &str, cow: bool) -> Result<(), String> {
+        match self.catalogue_for_source(source) {
+            Some(_) if !cow => Err(format!("{source} comes from the catalogue, so an image of it must be copy-on-write")),
+            Some(_) => Ok(()),
+            None => crate::stores::locate(&self.config, source).map(|_| ()),
+        }
     }
 
     pub fn delete_image(&self, id: &str) -> Result<(), String> {
@@ -237,6 +271,79 @@ impl State {
         self.images.write().unwrap().remove(id);
         self.notify(Change::Images);
         Ok(())
+    }
+
+    // ---- The catalogue ----
+
+    pub fn catalogue(&self) -> Vec<crate::catalogue::Entry> {
+        self.catalogue.read().unwrap().values().cloned().collect()
+    }
+
+    pub fn catalogue_entry(&self, id: &str) -> Option<crate::catalogue::Entry> {
+        self.catalogue.read().unwrap().get(id).cloned()
+    }
+
+    /// The entry that fetches this image source, if one does.
+    pub fn catalogue_for_source(&self, source: &str) -> Option<crate::catalogue::Entry> {
+        self.catalogue.read().unwrap().values().find(|e| e.source() == source).cloned()
+    }
+
+    pub fn put_catalogue_entry(&self, e: crate::catalogue::Entry) -> Result<(), String> {
+        self.store.put(Table::Catalogue, &e.id, &e).map_err(|e| e.to_string())?;
+        self.catalogue.write().unwrap().insert(e.id.clone(), e);
+        self.cache_changed();
+        Ok(())
+    }
+
+    /// The images booting this entry's file. It can't go while there are any.
+    pub fn catalogue_users(&self, e: &crate::catalogue::Entry) -> Vec<String> {
+        let source = e.source();
+        self.images()
+            .into_iter()
+            .filter(|i| {
+                i.pi.as_ref().is_some_and(|p| p.source == source)
+                    || i.disk.as_ref().is_some_and(|d| d.source == source)
+                    || i.action.as_ref().is_some_and(|a| crate::catalogue::action_refs(a).contains(&e.id))
+            })
+            .map(|i| i.id)
+            .collect()
+    }
+
+    pub fn delete_catalogue_entry(&self, id: &str) -> Result<(), String> {
+        self.store.delete(Table::Catalogue, id).map_err(|e| e.to_string())?;
+        self.catalogue.write().unwrap().remove(id);
+        self.cache_changed();
+        Ok(())
+    }
+
+    pub fn cache_changed(&self) {
+        self.notify(Change::Catalogue);
+    }
+
+    pub fn cache_rows(&self) -> Vec<crate::cache::Row> {
+        self.store.all(Table::Cache).unwrap_or_else(|e| {
+            tracing::error!("can't read the cache table: {e}");
+            Vec::new()
+        })
+    }
+
+    pub fn cache_row(&self, name: &str) -> Option<crate::cache::Row> {
+        self.store.get(Table::Cache, name).unwrap_or_else(|e| {
+            tracing::error!(name, "can't read a cache row: {e}");
+            None
+        })
+    }
+
+    pub fn put_cache_row(&self, r: &crate::cache::Row) {
+        if let Err(e) = self.store.put(Table::Cache, &r.name, r) {
+            tracing::error!(name = r.name, "can't save a cache row: {e}");
+        }
+    }
+
+    pub fn delete_cache_row(&self, name: &str) {
+        if let Err(e) = self.store.delete(Table::Cache, name) {
+            tracing::error!(name, "can't delete a cache row: {e}");
+        }
     }
 
     // ---- Settings ----
@@ -333,12 +440,36 @@ impl State {
         let title = self.image_title(image);
         self.update_device(mac, |d| {
             d.menu = None;
+            d.waiting = None;
             d.last_boot = Some(BootRecord { at: now_ms(), image: image.into(), title: title.clone(), reason: reason.into() });
             if used_once && d.assignment.as_ref().is_some_and(|a| a.once && a.image == image) {
                 d.assignment = None;
             }
         });
         self.event(Some(mac), "boot", format!("Booting {title} ({reason})"));
+    }
+
+    /// Notes that a machine's boot is held for a download.
+    pub fn note_waiting(&self, mac: Mac, image: &str, detail: &str) {
+        let now = now_ms();
+        let title = self.image_title(image);
+        let (_, _) = self.update_device(mac, |d| {
+            d.last_seen = now;
+            d.waiting = match d.waiting.take() {
+                Some(w) if w.image == image => Some(Waiting { last: now, detail: detail.into(), ..w }),
+                _ => Some(Waiting { image: image.into(), since: now, last: now, detail: detail.into() }),
+            };
+        });
+        if self.device(mac).and_then(|d| d.waiting).is_some_and(|w| w.since == now) {
+            self.event(Some(mac), "boot", format!("Holding the boot of {title} until its download is ready"));
+        }
+    }
+
+    /// The machine isn't held any more: the file failed, or it moved on.
+    pub fn clear_waiting(&self, mac: Mac) {
+        if self.device(mac).is_some_and(|d| d.waiting.is_some()) {
+            self.update_device(mac, |d| d.waiting = None);
+        }
     }
 
     // ---- The doctor ----

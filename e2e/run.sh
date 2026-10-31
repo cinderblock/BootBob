@@ -17,6 +17,11 @@
 #      DHCP listener's arch detection has to have worked);
 #   2. BootBob recorded the right firmware;
 #   3. assigning "Power off" in the API while it waits at the menu powers the VM off.
+# Then, for a catalogue file that isn't here yet (fetched from a stand-in upstream on the
+# bridge):
+#   4. a VM assigned it reaches BootBob and waits, and its one-shot assignment isn't used;
+#   5. the download finishes, and the VM boots what arrived with nobody touching it;
+#   6. a second boot uses the cached copy: the upstream hears nothing.
 set -euo pipefail
 
 bootbob=$(realpath "$1")
@@ -124,6 +129,52 @@ run() { # name mac firmware-slug qemu-args...
 
 run seabios 52:54:00:00:00:01 bios -boot n
 run ovmf 52:54:00:00:00:02 efi-x64 -bios /usr/share/ovmf/OVMF.fd
+
+echo "==== a boot that waits for its download"
+up="$work/upstream"
+mkdir -p "$up"
+printf '#!ipxe\necho This came from the cache\npoweroff\n' >"$up/script.ipxe"
+python3 "$(dirname "$0")/slow-upstream.py" "$net.1" 8099 "$up" &
+pids+=($!)
+for _ in $(seq 50); do (exec 3<>"/dev/tcp/$net.1/8099") 2>/dev/null && break; sleep 0.2; done
+
+put() { curl -sf -X PUT -H 'content-type: application/json' -d "$2" "$api/$1" >/dev/null; }
+sum=$(sha256sum "$up/script.ipxe" | cut -d' ' -f1)
+put catalogue/e2e-script "{\"title\":\"E2E script\",\"url\":\"http://$net.1:8099/script.ipxe\",\"checksum\":\"sha256:$sum\"}"
+put images/e2e '{"title":"E2E","action":{"kind":"chain","url":"{cached:e2e-script}"}}'
+
+mac=52:54:00:00:00:03
+put "devices/$mac/assignment" '{"image":"e2e","once":true}'
+boot_vm() { # log-name
+  qemu-system-x86_64 -accel "$accel" -m 512 -display none -serial "file:$work/$1-serial.log" \
+    -netdev tap,id=n0,ifname=bb-tap0,script=no,downscript=no \
+    -device "virtio-net-pci,netdev=n0,mac=$mac" -no-reboot -boot n >"$work/$1-qemu.log" 2>&1 &
+  qemu=$!
+  pids+=("$qemu")
+}
+wait_off() { # what
+  local deadline=$((SECONDS + 120))
+  while kill -0 "$qemu" 2>/dev/null && ((SECONDS < deadline)); do sleep 1; done
+  if kill -0 "$qemu" 2>/dev/null; then echo "FAIL: $1"; return 1; fi
+}
+boot_vm wait
+wait_for "$mac" '.state == "fetching"' 240 "the VM is held for its download"
+curl -sf "$api/devices/$mac" | jq -e '.assignment.once == true and .last_boot == null' >/dev/null \
+  || { echo "FAIL: waiting used up the assignment"; exit 1; }
+echo "ok: the VM is waiting, its one-shot assignment intact"
+touch "$up/release"
+wait_off "the VM didn't boot what arrived"
+wait_for "$mac" '.last_boot.image == "e2e" and .assignment == null' 5 "the boot recorded"
+curl -sf "$api/catalogue" | jq -e '.entries[0].status.state == "ready"' >/dev/null || { echo "FAIL: not cached"; exit 1; }
+echo "ok: downloaded, verified, booted, with nobody touching it"
+
+requests=$(wc -l <"$up/requests.log")
+rm "$up/release"   # Anything reaching the upstream now would hang there.
+put "devices/$mac/assignment" '{"image":"e2e","once":true}'
+boot_vm cached
+wait_off "the second boot didn't use the cached copy"
+[ "$(wc -l <"$up/requests.log")" = "$requests" ] || { echo "FAIL: the second boot went upstream"; exit 1; }
+echo "ok: the second boot came from the cache"
 
 echo "==== events"
 curl -sf "$api/events" | jq -r '.[] | "\(.mac // "-") \(.kind): \(.message)"'

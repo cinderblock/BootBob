@@ -44,9 +44,11 @@ export interface Device {
   tftp: { at: Millis; path: string; served: string | null; ok: boolean | null } | null;
   last_script: Millis | null;
   pi_session: { image: string; started: Millis; last: Millis } | null;
+  /** Its boot is held until a catalogue file has arrived. */
+  waiting: { image: string; since: Millis; last: Millis; detail: string } | null;
   // Computed by the server:
   code: string;
-  state: "at_menu" | "menu_idle" | "pi_waiting" | "stuck" | "booted" | "seen";
+  state: "fetching" | "at_menu" | "menu_idle" | "pi_waiting" | "stuck" | "booted" | "seen";
   summary: string;
   next: { image: string; title: string; reason: string };
 }
@@ -92,6 +94,47 @@ export interface PiSource {
   size: number | null;
   boot_files: string[];
   error: string | null;
+}
+
+export type CacheStatus =
+  | { state: "absent" }
+  | { state: "ready"; size: number }
+  | { state: "fetching"; phase: string; done: number; total: number | null }
+  | { state: "failed"; why: string; permanent: boolean };
+
+/** Something BootBob can fetch when a machine needs it. */
+export interface CatalogueEntry {
+  id: string;
+  title: string;
+  store: string | null;
+  url: string;
+  checksum: string | null;
+  image_checksum: string | null;
+  pinned: boolean;
+}
+
+export interface CatalogueView extends CatalogueEntry {
+  status: CacheStatus;
+  allocated: number;
+  kept: string | null;
+  last_used: Millis | null;
+}
+
+export interface CatalogueOverview {
+  entries: CatalogueView[];
+  hosts: { store: string | null; cap: number; used: number; free: number | null; error: string | null }[];
+}
+
+/** An image in Raspberry Pi's own list. */
+export interface PiOsImage {
+  title: string;
+  description: string;
+  url: string;
+  checksum: string | null;
+  image_checksum: string | null;
+  download_size: number;
+  image_size: number;
+  release_date: string;
 }
 
 export interface Theme {
@@ -167,6 +210,11 @@ export const api = {
   piSources: () => call<PiSource[]>("GET", "/api/pi/sources"),
   overlays: (mac: string) => call<Overlay[]>("GET", `/api/devices/${mac}/overlays`),
   resetOverlay: (mac: string, source: string) => call<void>("DELETE", `/api/devices/${mac}/overlays/${encodeURIComponent(source)}`),
+  catalogue: () => call<CatalogueOverview>("GET", "/api/catalogue"),
+  piOsImages: () => call<PiOsImage[]>("GET", "/api/catalogue/pi-os"),
+  putEntry: (e: CatalogueEntry) => call<CatalogueEntry>("PUT", `/api/catalogue/${encodeURIComponent(e.id)}`, e),
+  deleteEntry: (id: string) => call<void>("DELETE", `/api/catalogue/${encodeURIComponent(id)}`),
+  fetchEntry: (id: string) => call<CacheStatus>("POST", `/api/catalogue/${encodeURIComponent(id)}/fetch`),
   settings: () => call<Settings>("GET", "/api/settings"),
   putSettings: (s: Settings) => call<Settings>("PUT", "/api/settings", s),
   events: (mac?: string) => call<BootEvent[]>("GET", `/api/events${mac ? `?mac=${mac}` : ""}`),
@@ -179,6 +227,7 @@ export type Change =
   | { what: "images" }
   | { what: "settings" }
   | { what: "event" }
+  | { what: "catalogue" }
   | { what: "resync" };
 
 export interface DoctorCheck {

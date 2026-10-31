@@ -19,6 +19,7 @@ use bootbob_pi::{Found, Prefix};
 use bootbob_tftp::{Content, Outcome, Request, Resolution, Resolver};
 use bytes::Bytes;
 
+use crate::catalogue::Hold;
 use crate::model::{Device, PI_SESSION_GAP_MS, PiBoot, PiSession, TftpSeen, now_ms};
 use crate::state::State;
 
@@ -79,20 +80,13 @@ impl Tftp {
         });
     }
 
-    /// The image a Pi's request belongs to: the boot in progress, or a new one (which
-    /// records the boot and uses up a one-shot assignment). `None`: nothing to serve it.
-    fn pi_image(&self, mac: Mac, dev: &Device) -> Option<(String, PiBoot, bool)> {
-        let now = now_ms();
-        if let Some(s) = &dev.pi_session
-            && now.saturating_sub(s.last) < PI_SESSION_GAP_MS
-            && let Some(pi) = self.st.image(&s.image).and_then(|i| i.pi)
-        {
-            return Some((s.image.clone(), pi, false));
+    /// The boot in progress, if this request belongs to one.
+    fn pi_session(&self, dev: &Device) -> Option<(String, PiBoot)> {
+        let s = dev.pi_session.as_ref()?;
+        if now_ms().saturating_sub(s.last) >= PI_SESSION_GAP_MS {
+            return None;
         }
-        let r = self.st.resolve_pi(dev)?;
-        let pi = self.st.image(&r.image)?.pi?;
-        self.st.record_boot(mac, &r.image, &r.reason, r.once);
-        Some((r.image, pi, true))
+        Some((s.image.clone(), self.st.image(&s.image)?.pi?))
     }
 
     async fn pi(&self, req: &Request, mac: Option<Mac>, ip: Option<Ipv4Addr>, prefix: Option<Prefix>, file: &str) -> Resolution {
@@ -118,7 +112,17 @@ impl Tftp {
             });
         };
 
-        let Some((image, pi, new)) = self.pi_image(mac, &dev) else {
+        // A boot in progress, or a new one (which records the boot and uses up a one-shot
+        // assignment, so not until its image is here).
+        let (next, resolved) = match self.pi_session(&dev) {
+            Some(s) => (Some(s), None),
+            None => match self.st.resolve_pi(&dev).and_then(|r| Some((self.st.image(&r.image)?.pi?, r))) {
+                Some((pi, r)) => (Some((r.image.clone(), pi)), Some(r)),
+                None => (None, None),
+            },
+        };
+        let new = resolved.is_some();
+        let Some((image, pi)) = next else {
             let fresh = dev.tftp.as_ref().is_none_or(|t| now.saturating_sub(t.at) >= PI_SESSION_GAP_MS);
             self.note(Some(mac), ip, &path, None, |d| mark(d, None));
             if fresh {
@@ -126,7 +130,33 @@ impl Tftp {
             }
             return Resolution::NotFound;
         };
-        if new {
+        if let Some(r) = &resolved {
+            // A Pi can't be told to wait, only told no: its bootloader keeps trying
+            // (network-only `BOOT_ORDER`), and gets the files once they're here.
+            let entries = self.st.image(&image).map(|i| crate::catalogue::for_pi(&self.st, &i)).unwrap_or_default();
+            if !entries.is_empty() {
+                let st = self.st.clone();
+                let hold = tokio::task::spawn_blocking(move || crate::catalogue::hold(&st, &entries)).await;
+                match hold.unwrap_or_else(|e| Hold::Failed(e.to_string())) {
+                    Hold::Go => {}
+                    Hold::Wait(detail) => {
+                        self.note(Some(mac), ip, &path, None, |d| mark(d, None));
+                        self.st.note_waiting(mac, &image, &detail);
+                        return Resolution::NotFound;
+                    }
+                    Hold::Failed(why) => {
+                        let fresh =
+                            dev.waiting.is_some() || dev.tftp.as_ref().is_none_or(|t| now.saturating_sub(t.at) >= PI_SESSION_GAP_MS);
+                        self.note(Some(mac), ip, &path, None, |d| mark(d, None));
+                        self.st.clear_waiting(mac);
+                        if fresh {
+                            self.st.event(Some(mac), "error", format!("Can't boot {image}: {why}"));
+                        }
+                        return Resolution::NotFound;
+                    }
+                }
+            }
+            self.st.record_boot(mac, &r.image, &r.reason, r.once);
             tracing::info!(%mac, image, "Pi boot started");
         }
 

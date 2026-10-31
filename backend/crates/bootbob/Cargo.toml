@@ -21,20 +21,24 @@ bootbob-tftp.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
+libc.workspace = true
+lzma-rust2.workspace = true
 redb.workspace = true
 ruzstd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
+tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

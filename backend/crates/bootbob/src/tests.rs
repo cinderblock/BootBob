@@ -16,6 +16,9 @@ use crate::http::router;
 use crate::model::*;
 use crate::state::State;
 
+#[path = "cache_tests.rs"]
+mod cache_tests;
+
 struct T {
     st: Arc<State>,
     _dir: tempfile::TempDir,

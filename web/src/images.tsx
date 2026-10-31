@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Action, type DiskBoot, type Image, type PiBoot, type PiSource } from "./api";
+import { api, type Action, type CatalogueView, type DiskBoot, type Image, type PiBoot, type PiSource } from "./api";
 import type { Live } from "./live";
 
 type Kind = Action["kind"] | "pi" | "disk";
@@ -136,12 +136,21 @@ export function Images({ live }: { live: Live }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sources, setSources] = useState<PiSource[]>([]);
+  const [fetchable, setFetchable] = useState<CatalogueView[]>([]);
   const set = (patch: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...patch } : d));
   const editingPi = draft?.kind === "pi" || draft?.kind === "disk";
   useEffect(() => {
-    if (editingPi) api.piSources().then(setSources, () => setSources([]));
+    if (!editingPi) return;
+    api.piSources().then(setSources, () => setSources([]));
+    api.catalogue().then(
+      (c) => setFetchable(c.entries.filter((e) => e.id.endsWith(".img"))),
+      () => setFetchable([]),
+    );
   }, [editingPi]);
+  const sourceName = (e: CatalogueView) => (e.store ? `${e.store}:${e.id}` : e.id);
+  const onTheWay = fetchable.filter((e) => !sources.some((s) => s.path === sourceName(e)));
   const chosen = sources.find((s) => s.path === draft?.source.trim());
+  const chosenEntry = fetchable.find((e) => sourceName(e) === draft?.source.trim());
 
   return (
     <section>
@@ -238,6 +247,7 @@ export function Images({ live }: { live: Live }) {
               <label>
                 Kernel URL <input required value={draft.kernel} onInput={(e) => set({ kernel: e.currentTarget.value })} />
               </label>
+              <p className="muted small">URLs and the command line can name a catalogue file as {"{cached:<id>}"}.</p>
               <label>
                 Initrd URLs (one per line) <textarea rows={2} value={draft.initrds} onInput={(e) => set({ initrds: e.currentTarget.value })} />
               </label>
@@ -264,9 +274,15 @@ export function Images({ live }: { live: Live }) {
                       {s.boot_files.length ? `: ${s.boot_files.join(", ")}` : ""}
                     </option>
                   ))}
+                  {onTheWay.map((e) => (
+                    <option key={e.id} value={sourceName(e)}>
+                      from the catalogue: {e.title}
+                    </option>
+                  ))}
                 </datalist>
               </label>
               <p className="muted small">
+                {chosenEntry && "From the catalogue: the first boot fetches it, and it has to be copy-on-write. "}
                 {chosen
                   ? chosen.error
                     ? `Can't read it: ${chosen.error}`
@@ -316,9 +332,15 @@ export function Images({ live }: { live: Live }) {
                     .map((s) => (
                       <option key={s.path} value={s.path} />
                     ))}
+                  {onTheWay.map((e) => (
+                    <option key={e.id} value={sourceName(e)}>
+                      from the catalogue: {e.title}
+                    </option>
+                  ))}
                 </datalist>
               </label>
               <p className="muted small">
+                {chosenEntry && "From the catalogue: the first boot fetches it, and it has to be copy-on-write. "}
                 The image holds a FAT boot partition with the kernel and initrd, and the root filesystem, which the initrd mounts over
                 NBD. iPXE fetches the kernel and initrd from BootBob over HTTP.
               </p>

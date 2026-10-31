@@ -164,6 +164,69 @@ pub fn reset_overlay(store: &StoreConfig, mac: Mac, disk: &str) -> Result<bool, 
     }
 }
 
+/// Tells a store to make sure it has a catalogue file. A store that can't be reached is a
+/// failure the next poll may not repeat, so it's never a permanent one. Blocking.
+pub fn cache_ensure(store: &StoreConfig, name: &str, want: &crate::cache::Want) -> crate::cache::Status {
+    use crate::cache::Status;
+    let url = format!("{}/api/cache/{name}", store.url.trim_end_matches('/'));
+    let failed = |why: String| Status::Failed { why: format!("store {}: {why}", store.name), permanent: false };
+    let body = serde_json::to_vec(want).expect("a Want serializes");
+    let mut res = match agent().post(&url).content_type("application/json").send(&body[..]) {
+        Ok(r) => r,
+        Err(e) => return failed(e.to_string()),
+    };
+    if res.status().as_u16() != 200 {
+        return failed(format!("HTTP {}", res.status().as_u16()));
+    }
+    let text = res.body_mut().read_to_string().unwrap_or_default();
+    serde_json::from_str(&text).unwrap_or_else(|e| failed(e.to_string()))
+}
+
+/// What a store's cache holds. Blocking.
+pub fn cache_list(store: &StoreConfig) -> Result<crate::cache::Listing, String> {
+    let url = format!("{}/api/cache", store.url.trim_end_matches('/'));
+    let body =
+        get(&url).map_err(|e| format!("store {}: {e}", store.name))?.ok_or_else(|| format!("store {} has no cache API", store.name))?;
+    serde_json::from_slice(&body).map_err(|e| format!("store {}: {e}", store.name))
+}
+
+/// Pins a file on a store. Blocking.
+pub fn cache_pin(store: &StoreConfig, name: &str, pinned: bool) -> Result<(), String> {
+    let url = format!("{}/api/cache/{name}/pin", store.url.trim_end_matches('/'));
+    let body = serde_json::json!({ "pinned": pinned }).to_string();
+    match agent().put(&url).content_type("application/json").send(body.as_bytes()) {
+        Ok(r) if r.status().is_success() || r.status().as_u16() == 404 => Ok(()),
+        Ok(r) => Err(format!("store {}: HTTP {}", store.name, r.status().as_u16())),
+        Err(e) => Err(format!("store {}: {e}", store.name)),
+    }
+}
+
+/// Removes a file from a store's cache. Same results as the local remove. Blocking.
+pub fn cache_remove(store: &StoreConfig, name: &str) -> Result<bool, (u16, String)> {
+    let url = format!("{}/api/cache/{name}", store.url.trim_end_matches('/'));
+    let mut res = agent().delete(&url).call().map_err(|e| (502, format!("store {}: {e}", store.name)))?;
+    match res.status().as_u16() {
+        204 => Ok(true),
+        404 => Ok(false),
+        code => Err((code, res.body_mut().read_to_string().unwrap_or_default())),
+    }
+}
+
+/// The SHA-256 of a disk on a store: it reads the whole disk, so this takes a while.
+/// Blocking.
+pub fn disk_digest(store: &StoreConfig, disk: &str) -> Result<String, String> {
+    let url = format!("{}/store/digest/{disk}", store.url.trim_end_matches('/'));
+    let agent: ureq::Agent =
+        ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(1800))).http_status_as_error(false).build().into();
+    let mut res = agent.get(&url).call().map_err(|e| format!("store {}: {e}", store.name))?;
+    let body = res.body_mut().read_to_string().unwrap_or_default();
+    if res.status().as_u16() != 200 {
+        return Err(format!("store {}: HTTP {}: {body}", store.name, res.status().as_u16()));
+    }
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("store {}: {e}", store.name))?;
+    v["sha256"].as_str().map(String::from).ok_or_else(|| format!("store {}: no digest in its answer", store.name))
+}
+
 /// The main server's answer to a store asking about an NBD connection.
 #[derive(Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct Allow {

@@ -34,6 +34,8 @@ function partsFor(c: Change): Part[] {
       return ["settings", "devices"];
     case "event":
       return ["events"];
+    case "catalogue":
+      return ["devices"];
     case "resync":
       return ["status", "devices", "images", "settings", "events"];
   }

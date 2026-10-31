@@ -13,6 +13,8 @@ use serde::de::DeserializeOwned;
 const DEVICES: TableDefinition<&str, &[u8]> = TableDefinition::new("devices");
 const IMAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("images");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+const CATALOGUE: TableDefinition<&str, &[u8]> = TableDefinition::new("catalogue");
+const CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("cache");
 const EVENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("events");
 
 /// The event log keeps this many entries.
@@ -23,6 +25,8 @@ pub enum Table {
     Devices,
     Images,
     Meta,
+    Catalogue,
+    Cache,
 }
 
 impl Table {
@@ -31,6 +35,8 @@ impl Table {
             Table::Devices => DEVICES,
             Table::Images => IMAGES,
             Table::Meta => META,
+            Table::Catalogue => CATALOGUE,
+            Table::Cache => CACHE,
         }
     }
 }
@@ -47,6 +53,8 @@ impl Store {
         tx.open_table(DEVICES)?;
         tx.open_table(IMAGES)?;
         tx.open_table(META)?;
+        tx.open_table(CATALOGUE)?;
+        tx.open_table(CACHE)?;
         tx.open_table(EVENTS)?;
         tx.commit()?;
         Ok(Store { db })
