@@ -11,9 +11,8 @@
 #
 # Then upload it, compressed so its zeros don't cross the network (`zstd out.img`, then
 # `curl -T out.img.zst -H 'Content-Encoding: zstd' http://<bootbob>:8067/api/disks/out.img`)
-# and make a
-# BootBob image with a `disk` section: source out.img, kernel vmlinuz, initrd initrd.img,
-# command line `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp
+# and make a BootBob image with a `disk` section: source out.img, kernel vmlinuz, initrd
+# initrd.img, command line `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp
 # NBDCLIENT=/usr/sbin/bootbob-nbd-client`, copy-on-write on.
 #
 # The image: Debian trixie amd64, linux-image-amd64, nbd-client (its initramfs hook

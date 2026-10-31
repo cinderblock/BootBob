@@ -77,6 +77,7 @@ check "no failed units" 'test "$(systemctl --failed --no-legend | wc -l)" = 0 ||
 check "networkd manages the interface and kept the address" 'networkctl --no-pager | grep -E "e[a-z0-9]+ +ether +routable +configured" && ip -4 -br addr | grep 10.0.2'
 check "DNS works" 'getent hosts deb.debian.org'
 check "apt reaches both repositories" 'apt-get update 2>&1 | tail -2; apt-cache policy raspi-firmware | grep -q archive.raspberrypi.com'
+check "EEPROM updates are on, for boards that have an EEPROM" 'test "$(systemctl is-enabled rpi-eeprom-update)" = enabled'
 check "the Pi kernels are in the boot partition" 'ls /boot/firmware/kernel8.img /boot/firmware/kernel_2712.img /boot/firmware/initramfs8'
 
 echo "== restarting the NBD server under a writing machine"
