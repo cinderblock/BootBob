@@ -10,7 +10,7 @@ name: PC golden image
 
 on:
   push:
-    branches: [master, rollout]
+    branches: [master]
     paths:
       - tools/make-pc-golden.sh
       - tools/test-rollout.sh
