@@ -28,3 +28,14 @@ from the catalogue, on a Pi" looks like it should work, and is what people will 
 `sparse::not_a_disk` refuses them with a clear message. That rules out Ubuntu's cloud images
 (`.img` that is really qcow2) and about half of the third-party images in Raspberry Pi's list
 (`.zip`; `catalogue::parse_pi_os` leaves them out). Debian's `.raw` and Pi OS's `.img.xz` work.
+
+## A Pi that reboots quickly ignores a new assignment
+
+`PI_SESSION_GAP_MS` (60 s, `backend/crates/bootbob/src/model.rs`) decides that TFTP requests
+belong to one boot, so `Tftp::pi_session` keeps serving the same image. A Pi that reboots
+within 60 s of its last request looks like the same boot. Seen on desky, 2026-11-01 12:15-12:16
+PM PST (20:15-20:16Z): assigned back to `desky`, rebooted 12 s after its last TFTP read, and
+booted the one-shot test image a second time; the event log shows `start4.elf` served from the
+old image, with no new `Booting` line. A reboot after 60 s worked. It matters because a one-shot
+boot runs twice, and a machine told to leave an image can stay on it. The DHCP listener's
+`Started a network boot` event fired at the time, so a new boot was visible.
