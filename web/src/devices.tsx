@@ -77,6 +77,7 @@ function DeviceRow({ d, live, now, open, toggle }: { d: Device; live: Live; now:
         <td>
           {d.next.title}
           {d.assignment?.once && <span className="tag">once</span>}
+          {d.assignment?.track && <span className="tag">follows {d.assignment.track}</span>}
         </td>
         <td>
           <Ago ms={d.last_seen} now={now} />
@@ -108,6 +109,7 @@ function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) 
   const [events, setEvents] = useState<BootEvent[]>([]);
   const [confirmForget, setConfirmForget] = useState(false);
   const [overlays, setOverlays] = useState<Overlay[]>([]);
+  const [track, setTrack] = useState(d.assignment?.track ?? "");
 
   // This machine's log, refreshed whenever the global log moves.
   useEffect(() => {
@@ -123,6 +125,11 @@ function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) 
   const run = (p: Promise<unknown>) => p.then(() => setError(null), (e: Error) => setError(e.message));
   // A Pi boots only images with Pi boot files; a PC only those with an iPXE action.
   const bootable = live.images.filter((i) => (isPi ? i.pi !== null : i.action !== null || i.disk !== null || i.id === "menu"));
+  // Tracks of its kind: a version boots either Pis or PCs.
+  const followable = live.tracks.filter((t) => {
+    const current = live.images.find((i) => i.id === t.current);
+    return current && (isPi ? current.pi !== null : current.disk !== null);
+  });
 
   return (
     <div className="device-detail">
@@ -162,6 +169,33 @@ function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) 
           )}
         </form>
         {d.state === "at_menu" && <p className="muted small">It's waiting at the menu, so it picks this up at its next check-in.</p>}
+        {followable.length > 0 && (
+          <form
+            className="assign"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (track) run(api.assign(d.mac, { image: "", once: false, track }));
+            }}
+          >
+            <select value={track} onChange={(e) => setTrack(e.currentTarget.value)}>
+              <option value="">Follow a track…</option>
+              {followable.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.title}
+                </option>
+              ))}
+            </select>
+            <button type="submit" disabled={!track || d.assignment?.track === track} title="Its root is replaced by each new version, and it reboots itself in the window. Only for machines that keep their state elsewhere.">
+              Follow
+            </button>
+          </form>
+        )}
+        {d.check && (
+          <p className="muted small">
+            Checked in <Ago ms={d.check.at} now={now} />: {d.check.health}
+            {d.check.busy && `, busy (${d.check.busy})`}.
+          </p>
+        )}
         {error && <p className="error">{error}</p>}
 
         {overlays.length > 0 && (

@@ -302,6 +302,13 @@ dd {
   word-break: break-word;
 }
 
+.track {
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 0.25rem 1rem 1rem;
+  margin: 1rem 0;
+}
+
 ul.overlays {
   list-style: none;
   padding: 0;

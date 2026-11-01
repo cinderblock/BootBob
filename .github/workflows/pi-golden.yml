@@ -4,6 +4,10 @@ name: Pi golden image
 # over NBD (tools/test-pi-golden.sh). The image has no credentials in it, so it can be
 # an artifact: put your own authorized_keys in its boot partition before uploading it
 # to BootBob (see tools/make-pi-golden.sh).
+#
+# Each build is named for its date, because an overlay is tied to one exact disk: a new
+# build is a new file, and machines move to it with a rollout (see the README). Weekly, so
+# there's always a recent one with this week's security updates. Nothing adopts it by itself.
 
 on:
   push:
@@ -12,7 +16,10 @@ on:
       - tools/make-pi-golden.sh
       - tools/test-pi-golden.sh
       - tools/bootbob-nbd-client.hook
+      - tools/machine/**
       - .github/workflows/pi-golden.yml
+  schedule:
+    - cron: "17 9 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -24,6 +31,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Name this build
+        run: echo "NAME=debian-trixie-rpi-arm64-$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
       - name: Fetch bootbob-nbd-client from the latest published BootBob
         run: |
           # An amd64 image, but the tools are only copied out, never run here.
@@ -32,16 +41,20 @@ jobs:
           docker cp "$id:/usr/share/bootbob/tools" client-tools
           docker rm "$id"
       - name: Build
-        run: TOOLS=client-tools TEST_KERNEL=1 sh tools/make-pi-golden.sh ./debian-trixie-rpi-arm64.img
+        run: TOOLS=client-tools TEST_KERNEL=1 sh tools/make-pi-golden.sh "./$NAME.img"
       - name: Install the test's tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm qemu-utils mtools
       - name: Boot it in a VM
-        run: sh tools/test-pi-golden.sh ./debian-trixie-rpi-arm64.img
+        run: sh tools/test-pi-golden.sh "./$NAME.img"
       - name: Compress
-        run: zstd -T0 -6 --sparse debian-trixie-rpi-arm64.img -o debian-trixie-rpi-arm64.img.zst
+        run: |
+          sha256sum "$NAME.img" | tee "$NAME.img.sha256" >> "$GITHUB_STEP_SUMMARY"
+          zstd -T0 -6 --sparse "$NAME.img" -o "$NAME.img.zst"
       - uses: actions/upload-artifact@v4
         with:
-          name: debian-trixie-rpi-arm64
-          path: debian-trixie-rpi-arm64.img.zst
+          name: ${{ env.NAME }}
+          path: |
+            ${{ env.NAME }}.img.zst
+            ${{ env.NAME }}.img.sha256
           retention-days: 30
           compression-level: 0

@@ -18,6 +18,8 @@ use crate::state::State;
 
 #[path = "cache_tests.rs"]
 mod cache_tests;
+#[path = "rollout_tests.rs"]
+mod rollout_tests;
 
 struct T {
     st: Arc<State>,
@@ -131,7 +133,7 @@ async fn assigning_a_waiting_machine_boots_it_on_the_next_poll() {
 #[tokio::test]
 async fn a_failed_boot_returns_to_the_menu_instead_of_looping() {
     let t = setup();
-    t.st.assign(MAC.parse().unwrap(), Some(Assignment { image: "netboot.xyz".into(), once: false, set_at: 0 })).unwrap();
+    t.st.assign(MAC.parse().unwrap(), Some(Assignment { image: "netboot.xyz".into(), once: false, set_at: 0, track: None })).unwrap();
     let first = get(&t.st, &ident("")).await;
     assert!(first.contains("chain --autofree https://boot.netboot.xyz || goto failed"));
     let again = get(&t.st, &ident("&failed=1")).await;
@@ -170,7 +172,7 @@ async fn image_and_settings_validation() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     let (s, _) = call(&t.st, Method::PUT, "/api/images/r", Some(json!({"title": "R", "action": {"kind": "reboot"}}))).await;
     assert_eq!(s, StatusCode::OK);
-    t.st.assign(MAC.parse().unwrap(), Some(Assignment { image: "r".into(), once: false, set_at: 0 })).unwrap();
+    t.st.assign(MAC.parse().unwrap(), Some(Assignment { image: "r".into(), once: false, set_at: 0, track: None })).unwrap();
     let (s, body) = call(&t.st, Method::DELETE, "/api/images/r", None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "in use: {body}");
     let (s, _) = call(&t.st, Method::PUT, &format!("/api/devices/{MAC}/assignment"), Some(json!({"image": "nope"}))).await;
@@ -328,7 +330,7 @@ async fn everything_survives_a_restart() {
             builtin: false,
         })
         .unwrap();
-        st.assign(mac, Some(Assignment { image: "r".into(), once: false, set_at: 0 })).unwrap();
+        st.assign(mac, Some(Assignment { image: "r".into(), once: false, set_at: 0, track: None })).unwrap();
         st.put_settings(Settings { poll_secs: 7, ..Settings::default() }).unwrap();
     }
     let st = State::open(config).unwrap();
@@ -576,7 +578,7 @@ async fn nbd_exports_go_only_to_the_machine_assigned_the_disk() {
     let other: Mac = "dc:a6:32:09:09:09".parse().unwrap();
     t.st.learn_address(Ipv4Addr::from(PI_IP), desky);
     t.st.learn_address(Ipv4Addr::new(10, 255, 7, 50), other);
-    t.st.assign(desky, Some(Assignment { image: "desky".into(), once: true, set_at: 0 })).unwrap();
+    t.st.assign(desky, Some(Assignment { image: "desky".into(), once: true, set_at: 0, track: None })).unwrap();
     t.st.update_device(other, |_| {});
 
     let nbd = crate::nbd::Nbd { st: t.st.clone() };
@@ -619,7 +621,7 @@ async fn a_cow_image_gives_each_pi_its_own_overlay() {
     t.st.learn_address(ip_a, a);
     t.st.learn_address(ip_b, b);
     for m in [a, b] {
-        t.st.assign(m, Some(Assignment { image: "golden".into(), once: false, set_at: 0 })).unwrap();
+        t.st.assign(m, Some(Assignment { image: "golden".into(), once: false, set_at: 0, track: None })).unwrap();
     }
     let nbd = crate::nbd::Nbd { st: t.st.clone() };
     let peer = |ip: Ipv4Addr| SocketAddr::from((ip, 40000));

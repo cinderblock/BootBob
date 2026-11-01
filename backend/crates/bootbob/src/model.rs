@@ -43,6 +43,70 @@ pub struct Device {
     pub pi_session: Option<PiSession>,
     /// Its boot is held until a catalogue file has arrived.
     pub waiting: Option<Waiting>,
+    /// The last time a running system checked in (`/boot/rollout`).
+    pub check: Option<Check>,
+    /// Being moved between versions of its track.
+    pub moving: Option<Move>,
+    /// It didn't reboot when told to, so it isn't asked again before this.
+    pub not_before: Option<Millis>,
+}
+
+/// A running machine reporting in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Check {
+    pub at: Millis,
+    /// `systemctl is-system-running`: `running` is healthy.
+    pub health: String,
+    /// Why it mustn't reboot now. Empty: it may.
+    pub busy: String,
+}
+
+/// A machine on its way from one version to another. It's finished once it has booted `to`
+/// and said it's healthy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Move {
+    pub track: String,
+    pub from: String,
+    pub to: String,
+    pub started: Millis,
+    /// Going back from a version it wasn't healthy on.
+    #[serde(default)]
+    pub back: bool,
+}
+
+/// A series of versions of one golden image, and the one machines following it should be on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Track {
+    /// From the URL in `PUT /api/tracks/{id}`, so optional in the body.
+    #[serde(default)]
+    pub id: String,
+    pub title: String,
+    /// The image machines should be on.
+    pub current: String,
+    /// Oldest first. Each is an ordinary copy-on-write image over its own disk.
+    #[serde(default)]
+    pub versions: Vec<Version>,
+    /// Set when a machine failed on a version. Nothing more moves until a person clears it.
+    #[serde(default)]
+    pub halted: Option<Halt>,
+    /// Why the next machine can't start, for as long as that's true (a store that's down).
+    #[serde(default)]
+    pub blocked: Option<String>,
+    /// "Run now": machines may move until then, whatever the time.
+    #[serde(default)]
+    pub open_until: Option<Millis>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Version {
+    pub image: String,
+    pub added_at: Millis,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Halt {
+    pub at: Millis,
+    pub why: String,
 }
 
 /// A boot held for a download.
@@ -69,12 +133,18 @@ pub const PI_SESSION_GAP_MS: Millis = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assignment {
+    /// The image, or with `track`, empty for the track's current version.
+    #[serde(default)]
     pub image: String,
     /// Boot it once, then go back to the normal resolution.
     #[serde(default)]
     pub once: bool,
     #[serde(default)]
     pub set_at: Millis,
+    /// Follow this track: its rollouts move this machine, and may reboot it. Saying so is what
+    /// says its root is disposable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +219,18 @@ pub struct Image {
     pub builtin: bool,
 }
 
+impl Image {
+    /// The disk it boots, whether that's copy-on-write, and its command line, when it's made
+    /// of exactly one disk.
+    pub fn one_disk(&self) -> Option<(&str, bool, &str)> {
+        match (&self.action, &self.pi, &self.disk) {
+            (None, Some(p), None) => Some((&p.source, p.cow, &p.cmdline)),
+            (None, None, Some(d)) => Some((&d.source, d.cow, &d.cmdline)),
+            _ => None,
+        }
+    }
+}
+
 /// A PC booting a whole system from a disk image, the way a Pi image does: the image
 /// holds a FAT boot partition (kernel, initrd) and the root filesystem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,7 +245,7 @@ pub struct DiskBoot {
     #[serde(default)]
     pub initrd: String,
     /// The kernel command line. `{server}` (BootBob's NBD address), `{disk}` (the image's
-    /// file name), `{mac}` and `{ip}` are filled in per machine, e.g.
+    /// file name), `{bootbob}` (BootBob's URL), `{mac}` and `{ip}` are filled in per machine, e.g.
     /// `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp`.
     #[serde(default)]
     pub cmdline: String,
@@ -182,7 +264,8 @@ pub struct PiBoot {
     /// A directory or a disk image (`.img`) in the images directory, relative to it, on a
     /// store, or a catalogue entry. A disk image's FAT boot partition is read in place.
     pub source: String,
-    /// Replaces the tree's `cmdline.txt`. `{serial}`, `{mac}`, `{ip}` and `{server}` are
+    /// Replaces the tree's `cmdline.txt`. `{serial}`, `{mac}`, `{ip}`, `{server}` (where its
+    /// disk is served), `{disk}` (the disk's export name) and `{bootbob}` (BootBob's URL) are
     /// filled in per Pi. Empty: the tree's own.
     #[serde(default)]
     pub cmdline: String,
@@ -216,6 +299,14 @@ pub struct Settings {
     /// After this long at the menu untouched, boot the local disk, so a PC that merely
     /// tries the network before its disk still starts normally. 0: wait forever.
     pub menu_timeout_secs: u32,
+    /// When rollouts may move machines each day: `HH:MM` in `time_zone`, for `rollout_minutes`.
+    pub rollout_start: String,
+    pub rollout_minutes: u32,
+    /// How long a machine has, from the start of its boot, to say it's healthy on a new
+    /// version. Past that the rollout halts. Longer than the machine's slowest healthy boot.
+    pub rollout_health_minutes: u32,
+    /// An IANA name, such as `America/Los_Angeles`.
+    pub time_zone: String,
     pub theme: Theme,
 }
 
@@ -226,6 +317,10 @@ impl Default for Settings {
             pi_default_image: String::new(),
             poll_secs: 10,
             menu_timeout_secs: 120,
+            rollout_start: "05:00".into(),
+            rollout_minutes: 60,
+            rollout_health_minutes: 15,
+            time_zone: "UTC".into(),
             theme: Theme::default(),
         }
     }

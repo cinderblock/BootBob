@@ -5,9 +5,10 @@ import { Doctor } from "./doctor";
 import { Images } from "./images";
 import { useLive, useNow } from "./live";
 import { Log } from "./log";
+import { Rollouts } from "./rollouts";
 import { SettingsView } from "./settings";
 
-const tabs = ["Machines", "Images", "Catalogue", "Network check", "Settings", "Log"] as const;
+const tabs = ["Machines", "Images", "Rollouts", "Catalogue", "Network check", "Settings", "Log"] as const;
 type Tab = (typeof tabs)[number];
 
 export function App() {
@@ -55,6 +56,7 @@ export function App() {
       <main>
         {tab === "Machines" && <Devices live={live} now={now} />}
         {tab === "Images" && <Images live={live} />}
+        {tab === "Rollouts" && <Rollouts live={live} now={now} />}
         {tab === "Catalogue" && <Catalogue live={live} now={now} />}
         {tab === "Network check" && <Doctor now={now} />}
         {tab === "Settings" && <SettingsView live={live} />}

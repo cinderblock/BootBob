@@ -1,0 +1,69 @@
+name: PC golden image
+
+# Builds the PC golden image and runs a real rollout on it (tools/test-rollout.sh): two VMs
+# netboot it, move to a new version one at a time, go back, wait when busy, and stop at a
+# broken version. The image has no credentials in it, so it can be an artifact: put your own
+# authorized_keys in it before uploading it to BootBob (see tools/make-pc-golden.sh).
+#
+# Each build is named for its date, because an overlay is tied to one exact disk. Weekly, so
+# there's always a recent one. Nothing adopts it by itself.
+
+on:
+  push:
+    branches: [master, rollout]
+    paths:
+      - tools/make-pc-golden.sh
+      - tools/test-rollout.sh
+      - tools/bootbob-nbd-client.hook
+      - tools/machine/**
+      - backend/crates/bootbob/src/rollout.rs
+      - .github/workflows/pc-golden.yml
+  schedule:
+    - cron: "47 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: Name this build
+        run: echo "NAME=debian-trixie-amd64-$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+      - name: Fetch the iPXE builds and bootbob-nbd-client from the latest published BootBob
+        run: |
+          docker pull -q ghcr.io/cinderblock/bootbob:latest
+          id=$(docker create ghcr.io/cinderblock/bootbob:latest)
+          docker cp "$id:/usr/share/bootbob/tools" client-tools
+          docker cp "$id:/usr/share/bootbob/ipxe" ipxe-builds
+          docker rm "$id"
+      - name: Build
+        run: TOOLS=$PWD/client-tools sh tools/make-pc-golden.sh "./$NAME.img"
+      - name: Build BootBob
+        working-directory: backend
+        run: cargo build --locked -p bootbob
+      - name: Install the test's tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ipxe-qemu seabios dnsmasq-base jq e2fsprogs
+      - name: Run a real rollout on it
+        run: sudo tools/test-rollout.sh backend/target/debug/bootbob ipxe-builds "./$NAME.img"
+      - name: Compress
+        run: |
+          sha256sum "$NAME.img" | tee "$NAME.img.sha256" >> "$GITHUB_STEP_SUMMARY"
+          zstd -T0 -6 --sparse "$NAME.img" -o "$NAME.img.zst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            ${{ env.NAME }}.img.zst
+            ${{ env.NAME }}.img.sha256
+          retention-days: 30
+          compression-level: 0

@@ -1,24 +1,26 @@
 // Live data: everything the UI shows, refetched when /api/stream says it changed.
 
 import { useEffect, useRef, useState } from "react";
-import { api, type BootEvent, type Change, type Device, type Image, type Settings, type Status } from "./api";
+import { api, type BootEvent, type Change, type Device, type Image, type Settings, type Status, type Track } from "./api";
 
 export interface Live {
   status: Status | null;
   devices: Device[];
   images: Image[];
+  tracks: Track[];
   settings: Settings | null;
   events: BootEvent[];
   error: string | null;
   connected: boolean;
 }
 
-type Part = "status" | "devices" | "images" | "settings" | "events";
+type Part = "status" | "devices" | "images" | "tracks" | "settings" | "events";
 
 const loaders: Record<Part, () => Promise<unknown>> = {
   status: api.status,
   devices: api.devices,
   images: api.images,
+  tracks: api.tracks,
   settings: api.settings,
   events: () => api.events(),
 };
@@ -31,13 +33,15 @@ function partsFor(c: Change): Part[] {
     case "images":
       return ["images", "devices"];
     case "settings":
-      return ["settings", "devices"];
+      return ["settings", "devices", "tracks"];
     case "event":
       return ["events"];
     case "catalogue":
       return ["devices"];
+    case "tracks":
+      return ["tracks", "images"];
     case "resync":
-      return ["status", "devices", "images", "settings", "events"];
+      return ["status", "devices", "images", "tracks", "settings", "events"];
   }
 }
 
@@ -46,6 +50,7 @@ export function useLive(): Live {
     status: null,
     devices: [],
     images: [],
+    tracks: [],
     settings: null,
     events: [],
     error: null,
@@ -77,7 +82,7 @@ export function useLive(): Live {
     const es = new EventSource("/api/stream");
     es.onopen = () => {
       setLive((l) => ({ ...l, connected: true }));
-      schedule(["status", "devices", "images", "settings", "events"]);
+      schedule(["status", "devices", "images", "tracks", "settings", "events"]);
     };
     es.onerror = () => setLive((l) => ({ ...l, connected: false }));
     es.onmessage = (m) => {

@@ -7,13 +7,17 @@
 #
 # With BOOTBOB set, bootbob-nbd-client and its initramfs hook are fetched from it and
 # baked in, so machines' roots survive BootBob restarting: add
-# NBDCLIENT=/usr/sbin/bootbob-nbd-client to the image's command line.
+# NBDCLIENT=/usr/sbin/bootbob-nbd-client to the image's command line. TOOLS=<dir> instead
+# takes bootbob-nbd-client-x86_64 and the hook from a directory.
 #
 # Then upload it, compressed so its zeros don't cross the network (`zstd out.img`, then
 # `curl -T out.img.zst -H 'Content-Encoding: zstd' http://<bootbob>:8067/api/disks/out.img`)
 # and make a BootBob image with a `disk` section: source out.img, kernel vmlinuz, initrd
 # initrd.img, command line `root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp
-# NBDCLIENT=/usr/sbin/bootbob-nbd-client`, copy-on-write on.
+# NBDCLIENT=/usr/sbin/bootbob-nbd-client bootbob.url={bootbob}`, copy-on-write on. Name the
+# file for its date (debian-trixie-amd64-20261108.img), since an overlay is tied to one exact
+# disk: a new build is a new file, for rollouts (see the README). bootbob.url is how the
+# bootbob-rollout timer finds BootBob.
 #
 # The image: Debian trixie amd64, linux-image-amd64, nbd-client (its initramfs hook
 # brings NBD root support), openssh-server with the given authorized_keys for root,
@@ -28,11 +32,14 @@ NAME=$(basename "$OUT")
 [ -z "$KEYS" ] || [ -f "$KEYS" ] || { echo "no such keys file: $KEYS" >&2; exit 1; }
 KEYMOUNT=""
 [ -n "$KEYS" ] && KEYMOUNT="-v $(cd "$(dirname "$KEYS")" && pwd)/$(basename "$KEYS"):/keys:ro"
-TOOLS=$(mktemp -d)
-trap 'rm -rf "$TOOLS"' EXIT
-if [ -n "${BOOTBOB:-}" ]; then
-  curl -fsS -o "$TOOLS/bootbob-nbd-client" "$BOOTBOB/files/tools/bootbob-nbd-client-x86_64"
-  curl -fsS -o "$TOOLS/bootbob-nbd-client.hook" "$BOOTBOB/files/tools/bootbob-nbd-client.hook"
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+if [ -n "${TOOLS:-}" ]; then
+  cp "$TOOLS/bootbob-nbd-client-x86_64" "$WORK/bootbob-nbd-client"
+  cp "$TOOLS/bootbob-nbd-client.hook" "$WORK/"
+elif [ -n "${BOOTBOB:-}" ]; then
+  curl -fsS -o "$WORK/bootbob-nbd-client" "$BOOTBOB/files/tools/bootbob-nbd-client-x86_64"
+  curl -fsS -o "$WORK/bootbob-nbd-client.hook" "$BOOTBOB/files/tools/bootbob-nbd-client.hook"
 else
   echo "warning: BOOTBOB unset, so no bootbob-nbd-client: the image's root won't survive BootBob restarting" >&2
 fi
@@ -40,13 +47,14 @@ fi
 # mmdebstrap needs to mount /proc in the new root and run package scripts in a chroot,
 # hence --privileged. The container is thrown away afterwards.
 # shellcheck disable=SC2086
-docker run --rm --privileged -v "$OUTDIR:/out" -v "$TOOLS:/tools:ro" $KEYMOUNT -e NAME="$NAME" -e SIZE_GIB="$SIZE_GIB" debian:trixie sh -euc '
+docker run --rm --privileged -v "$OUTDIR:/out" -v "$WORK:/tools:ro" -v "$(cd "$(dirname "$0")/machine" && pwd):/machine:ro" \
+  $KEYMOUNT -e NAME="$NAME" -e SIZE_GIB="$SIZE_GIB" debian:trixie sh -euc '
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mmdebstrap dosfstools e2fsprogs fdisk mtools >/dev/null
 
 ROOT=/work/root
 mkdir -p /work
-mmdebstrap --variant=important --include=linux-image-amd64,initramfs-tools,nbd-client,openssh-server,systemd-sysv,udev,iproute2,ca-certificates \
+mmdebstrap --variant=important --include=linux-image-amd64,initramfs-tools,nbd-client,openssh-server,systemd-sysv,dbus,libpam-systemd,udev,iproute2,ca-certificates,curl \
   trixie "$ROOT" http://deb.debian.org/debian
 
 echo bootbob-pc > "$ROOT/etc/hostname"
@@ -64,6 +72,9 @@ if [ -f /tools/bootbob-nbd-client ]; then
   install -m 0755 /tools/bootbob-nbd-client "$ROOT/usr/sbin/bootbob-nbd-client"
   install -m 0755 /tools/bootbob-nbd-client.hook "$ROOT/etc/initramfs-tools/hooks/bootbob-nbd-client"
 fi
+install -m 0755 /machine/bootbob-rollout "$ROOT/usr/sbin/bootbob-rollout"
+install -m 0644 /machine/bootbob-rollout.service /machine/bootbob-rollout.timer "$ROOT/etc/systemd/system/"
+chroot "$ROOT" systemctl enable bootbob-rollout.timer >/dev/null
 # A serial console, so the VM can be watched without a screen.
 mkdir -p "$ROOT/etc/systemd/system/getty.target.wants"
 ln -sf /lib/systemd/system/serial-getty@.service "$ROOT/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service"

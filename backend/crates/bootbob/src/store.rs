@@ -15,6 +15,7 @@ const IMAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("images");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const CATALOGUE: TableDefinition<&str, &[u8]> = TableDefinition::new("catalogue");
 const CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("cache");
+const TRACKS: TableDefinition<&str, &[u8]> = TableDefinition::new("tracks");
 const EVENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("events");
 
 /// The event log keeps this many entries.
@@ -27,6 +28,7 @@ pub enum Table {
     Meta,
     Catalogue,
     Cache,
+    Tracks,
 }
 
 impl Table {
@@ -37,6 +39,7 @@ impl Table {
             Table::Meta => META,
             Table::Catalogue => CATALOGUE,
             Table::Cache => CACHE,
+            Table::Tracks => TRACKS,
         }
     }
 }
@@ -55,6 +58,7 @@ impl Store {
         tx.open_table(META)?;
         tx.open_table(CATALOGUE)?;
         tx.open_table(CACHE)?;
+        tx.open_table(TRACKS)?;
         tx.open_table(EVENTS)?;
         tx.commit()?;
         Ok(Store { db })

@@ -46,11 +46,29 @@ fn v4(ip: IpAddr) -> Option<Ipv4Addr> {
     }
 }
 
-/// Fills in a Pi image's `{serial}`, `{mac}`, `{ip}` and `{server}` placeholders.
-pub fn fill(template: &str, serial: &str, mac: Mac, ip: &str, server: &str) -> String {
+/// What a Pi image's placeholders stand for, beyond the machine itself.
+pub struct Filling<'a> {
+    pub serial: &'a str,
+    pub ip: &'a str,
+    /// Where its disk is served.
+    pub server: &'a str,
+    /// The disk's export name.
+    pub disk: &'a str,
+    /// BootBob's URL.
+    pub bootbob: &'a str,
+}
+
+/// Fills in a Pi image's `{serial}`, `{mac}`, `{ip}`, `{server}`, `{disk}` and `{bootbob}`.
+pub fn fill(template: &str, mac: Mac, f: &Filling) -> String {
     let m = mac.0;
     let mac = format!("{:02x}-{:02x}-{:02x}-{:02x}-{:02x}-{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
-    template.replace("{serial}", serial).replace("{mac}", &mac).replace("{ip}", ip).replace("{server}", server)
+    template
+        .replace("{serial}", f.serial)
+        .replace("{mac}", &mac)
+        .replace("{ip}", f.ip)
+        .replace("{server}", f.server)
+        .replace("{disk}", f.disk)
+        .replace("{bootbob}", f.bootbob)
 }
 
 impl Tftp {
@@ -172,9 +190,20 @@ impl Tftp {
             _ => self.st.config.tftp.map(|t| t.ip().to_string()).unwrap_or_default(),
         };
         // {server}: where its disk is served (a store's own address for a store image).
+        let bootbob = match &self.st.config.public_url {
+            Some(u) => u.trim_end_matches('/').to_string(),
+            None => format!("http://{here}:{}", self.st.config.http.port()),
+        };
         let server = crate::stores::nbd_host(&self.st.config, &pi.source, here);
         let ip_s = ip.map(|i| i.to_string()).unwrap_or_default();
-        let fill = |t: &str| fill(t, serial.as_deref().unwrap_or(""), mac, &ip_s, &server);
+        let filling = Filling {
+            serial: serial.as_deref().unwrap_or(""),
+            ip: &ip_s,
+            server: &server,
+            disk: crate::stores::export_name(&pi.source),
+            bootbob: &bootbob,
+        };
+        let fill = |t: &str| fill(t, mac, &filling);
 
         let lower = file.to_ascii_lowercase();
         let content = if lower == "cmdline.txt" && !pi.cmdline.trim().is_empty() {

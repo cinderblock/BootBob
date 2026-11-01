@@ -108,6 +108,8 @@ already running needs a reboot after the upgrade. Check with
 `cat /sys/block/nbd0/queue/discard_max_bytes`: anything but 0 means it's on.
 `tools/test-trim.sh` proves it all on a real kernel.
 
+An image's command line can name its disk as `{disk}`, and BootBob's URL as `{bootbob}`.
+
 Every file of one boot comes from the image it started with, so a "next boot only"
 assignment lasts the whole boot. A Pi with nothing to boot gets nothing, keeps asking, and
 shows up in the web UI as waiting.
@@ -128,6 +130,60 @@ space of its data. Compress an upload and they don't cross the network either:
 zstd out.img
 curl -T out.img.zst -H 'Content-Encoding: zstd' http://<bootbob>:8067/api/disks/out.img
 ```
+
+## Rolling out a new version of a golden image
+
+An overlay is a list of changed blocks over one exact disk, so a disk that machines share can't
+change. A new version is a new disk file, named for its date. A **track** is a series of them,
+one current, and machines that follow a track move to it by themselves.
+
+This is for cattle: machines whose state lives outside the root, on a data disk or NFS. Moving
+a machine replaces its root, and **it comes up on a fresh copy of the new version**, with new SSH
+host keys, because the state of that root stays behind. Only machines that follow a track move, so
+a machine on the same image that doesn't follow it is left alone. Only copy-on-write images can be
+versions, so a plain disk can't get on a track. Machines like that update themselves.
+
+**Set up.** A version's command line has to use `{disk}` and `bootbob.url={bootbob}`, which is how
+a machine's check-in timer finds BootBob. Golden images from `tools/make-pi-golden.sh` and
+`tools/make-pc-golden.sh` have the timer. On a machine of your own, install `bootbob-rollout`,
+`bootbob-rollout.service` and `bootbob-rollout.timer` from `/files/tools/`.
+
+```sh
+# Upload this week's build, then make it a version. It's checked before it's accepted.
+curl -T golden-20261108.img.zst -H 'Content-Encoding: zstd' http://<store>:8068/api/disks/golden-20261108.img
+curl -X POST -H 'content-type: application/json' -d '{"source": "uberfall:golden-20261108.img"}' \
+  http://<bootbob>:8067/api/tracks/golden/versions
+```
+
+The rest happens in the daily window (Settings, 05:00 for an hour by default; set your time zone).
+The **Rollouts** tab shows it, and can run a rollout now, stop one or go back.
+
+**How a machine moves.** BootBob can't reboot anything, so each machine's timer asks
+`/boot/rollout` every 2 minutes, saying how it is, and is told `stay` or `reboot`. Everything is
+decided on the server:
+
+- One machine at a time, and the next waits until the last has come back and said it's healthy
+  (`systemctl is-system-running` says `running`).
+- A machine that boots the new version and isn't healthy in 15 minutes (a setting) **halts the track**. It's
+  put back on the version it came from, and told to reboot if it's still listening. Nothing else
+  moves until someone chooses Resume.
+- A machine that's busy (someone logged in, apt running, or `/etc/bootbob/busy` prints something)
+  isn't touched, and takes its turn when it's idle. One that doesn't reboot in 10 minutes waits for
+  the next window.
+- No machine is told to reboot unless the new version's boot files can be read right now.
+- A machine that hasn't checked in for 30 minutes isn't waited for: it boots the new version
+  whenever it next boots.
+
+**Going back.** Choose an older version (or `POST /api/tracks/{id}/release`), and machines move
+to it the same way. Each version has its own overlay, named for its disk, so **a rollout never
+resets or deletes an overlay**, and a machine going back gets its state back. That's also true of
+going forward again: reset a machine's overlay of a version by hand if you want it fresh. Nothing
+is deleted automatically: delete an old version and then its disk, which takes its overlays with
+it, once nothing needs them.
+
+What this can't do: BootBob can't power-cycle a machine, so one that's wedged stays wedged (it
+boots the right version when someone restarts it). Healthy means systemd's opinion of itself, so
+make a service that matters fail loudly.
 
 ## Image stores
 
@@ -287,7 +343,8 @@ iPXE builds need Linux: `ipxe/build.sh <out-dir>` (needs `build-essential liblzm
 and `gcc-aarch64-linux-gnu` for arm64). CI builds them and runs the QEMU test
 (`sudo e2e/run.sh <bootbob> <ipxe-dir>`) on every push. The e2e test runs dnsmasq as a
 stand-in for the network's DHCP server, on a private bridge with no uplink, so it's only
-for throwaway VMs.
+for throwaway VMs. `tools/test-rollout.sh` runs a real rollout the same way, on two VMs, and CI
+runs it on every PC golden image (`.github/workflows/pc-golden.yml`).
 
 ## API
 
@@ -312,8 +369,14 @@ for throwaway VMs.
 | `GET /api/catalogue/pi-os` | Raspberry Pi's image list, as entries to add |
 | `GET /api/cache`, `POST/DELETE /api/cache/{name}`, `PUT /api/cache/{name}/pin` | One host's cache (the main server's and each store's) |
 | `GET /files/cache/{name}` | A cached file, with `Range` |
+| `GET /api/tracks`, `PUT/DELETE /api/tracks/{id}` | Tracks, and where their window stands. `PUT` takes `{"title": …, "image": …}`; a track goes only once no machine follows it |
+| `POST /api/tracks/{id}/versions` | `{"source": "uberfall:golden-20261108.img"}`: a new current version, a copy of the last over this disk |
+| `POST /api/tracks/{id}/release` | `{"image": …, "now": true}`: make a version current, to go back; `now` doesn't wait for the window |
+| `POST /api/tracks/{id}/run`, `POST /api/tracks/{id}/halt` | Move machines now, clearing a halt; stop moving any more |
+| `PUT /api/devices/{mac}/assignment` with `{"track": …}` | Follow a track (and `DELETE`, or any other assignment, to stop) |
+| `GET /boot/rollout?mac=…&health=…&busy=…` | A machine checking in: `stay` or `reboot` |
 | `GET /api/pi/sources` | Directories and disk images in the images directory, with the Pi boot files each has |
-| `GET/PUT /api/settings` | Default image (PCs and Pis), menu poll interval, theme |
+| `GET/PUT /api/settings` | Default image (PCs and Pis), menu poll interval, rollout window and time zone, theme |
 | `GET /api/events` | The log |
 | `GET /api/stream` | Server-sent events: what changed |
 | `GET /boot/ipxe?mac=…` | What iPXE asks; returns a script |

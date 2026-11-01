@@ -29,6 +29,7 @@ pub enum Change {
     Event,
     /// The catalogue, or something in a cache, changed.
     Catalogue,
+    Tracks,
 }
 
 /// Why a machine gets what it gets.
@@ -70,6 +71,7 @@ pub struct State {
     /// Which NBD exports are connected right now (shared with the NBD server).
     pub nbd_live: Arc<bootbob_nbd::Live>,
     catalogue: RwLock<BTreeMap<String, crate::catalogue::Entry>>,
+    tracks: RwLock<BTreeMap<String, Track>>,
     /// This host's downloads in progress.
     pub cache: crate::cache::Cache,
 }
@@ -89,6 +91,7 @@ impl State {
         }
         let settings = store.get::<Settings>(Table::Meta, "settings")?.unwrap_or_default();
         let catalogue = store.all::<crate::catalogue::Entry>(Table::Catalogue)?.into_iter().map(|e| (e.id.clone(), e)).collect();
+        let tracks = store.all::<Track>(Table::Tracks)?.into_iter().map(|t| (t.id.clone(), t)).collect();
         let events = store.recent_events::<Event>(EVENTS_IN_MEMORY)?.into();
         let (changes, _) = broadcast::channel(256);
         Ok(State {
@@ -105,6 +108,7 @@ impl State {
             changes,
             nbd_live: Arc::new(bootbob_nbd::Live::default()),
             catalogue: RwLock::new(catalogue),
+            tracks: RwLock::new(tracks),
             cache: Default::default(),
         })
     }
@@ -168,20 +172,126 @@ impl State {
     /// Sets or clears a device's assignment, creating the device if needed (so a machine
     /// can be assigned before it ever boots).
     pub fn assign(&self, mac: Mac, assignment: Option<Assignment>) -> Result<Device, String> {
+        let assignment = assignment.map(|a| self.follow(a)).transpose()?;
         if let Some(a) = &assignment
             && self.image(&a.image).is_none()
         {
             return Err(format!("no image {:?}", a.image));
         }
         let msg = match &assignment {
+            Some(Assignment { track: Some(t), image, .. }) => format!("Following {t}, now at {}", self.image_title(image)),
             Some(a) => format!("{} {}", if a.once { "Next boot only:" } else { "Assigned" }, self.image_title(&a.image)),
             None => "Assignment cleared".to_string(),
         };
         let (dev, _) = self.update_device(mac, |d| {
             d.assignment = assignment.map(|a| Assignment { set_at: now_ms(), ..a });
+            // A person just said what this machine boots, so a move in flight is over.
+            d.moving = None;
+            d.not_before = None;
         });
         self.event(Some(mac), "assigned", msg);
         Ok(dev)
+    }
+
+    /// Fills in an assignment that follows a track: its current version, unless it names one
+    /// of the track's versions.
+    fn follow(&self, a: Assignment) -> Result<Assignment, String> {
+        let Some(id) = &a.track else { return Ok(a) };
+        let t = self.track(id).ok_or_else(|| format!("no track {id:?}"))?;
+        if a.once {
+            return Err("following a track isn't a one-shot".into());
+        }
+        if !a.image.is_empty() && !t.versions.iter().any(|v| v.image == a.image) {
+            return Err(format!("{:?} isn't a version of {id}", a.image));
+        }
+        Ok(Assignment { image: if a.image.is_empty() { t.current } else { a.image }, ..a })
+    }
+
+    // ---- Tracks ----
+
+    pub fn tracks(&self) -> Vec<Track> {
+        self.tracks.read().unwrap().values().cloned().collect()
+    }
+
+    pub fn track(&self, id: &str) -> Option<Track> {
+        self.tracks.read().unwrap().get(id).cloned()
+    }
+
+    /// Only an image a rollout can move a machine onto and back from: copy-on-write, so a
+    /// machine's changes stay out of the shared disk (this is what keeps plain disks, which are
+    /// pets, off a track), with a command line that follows the disk and tells the machine how
+    /// to reach BootBob. A hand-written disk name would boot the wrong root.
+    pub fn check_version(&self, image: &Image) -> Result<(), String> {
+        let Some((source, cow, cmdline)) = image.one_disk() else {
+            return Err(format!("{} has to boot exactly one disk image, for Pis or for PCs", image.id));
+        };
+        if !cow {
+            return Err(format!("{}: a rollout replaces the root, so a version must be copy-on-write", image.id));
+        }
+        if !source.ends_with(".img") {
+            return Err(format!("{}: a version is a disk image (.img)", image.id));
+        }
+        for needed in ["{disk}", "{bootbob}"] {
+            if !cmdline.contains(needed) {
+                return Err(format!("{}: its command line must use {needed}, or a new version can't work", image.id));
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates a track on an image, or retitles one.
+    pub fn put_track(&self, id: &str, title: &str, image: Option<&str>) -> Result<Track, String> {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+            return Err("a track id is letters, digits, '-', '_' and '.'".into());
+        }
+        if title.trim().is_empty() {
+            return Err("a track needs a title".into());
+        }
+        if self.track(id).is_some() {
+            return self.edit_track(id, |t| t.title = title.trim().into()).ok_or_else(|| format!("no track {id:?}"));
+        }
+        let image = image.ok_or("a new track starts from an image")?;
+        self.check_version(&self.image(image).ok_or_else(|| format!("no image {image:?}"))?)?;
+        let t = Track {
+            id: id.into(),
+            title: title.trim().into(),
+            current: image.into(),
+            versions: vec![Version { image: image.into(), added_at: now_ms() }],
+            halted: None,
+            blocked: None,
+            open_until: None,
+        };
+        self.store.put(Table::Tracks, id, &t).map_err(|e| e.to_string())?;
+        self.tracks.write().unwrap().insert(id.into(), t.clone());
+        self.notify(Change::Tracks);
+        Ok(t)
+    }
+
+    /// Edits a track. `None` if there's no such track.
+    pub fn edit_track(&self, id: &str, f: impl FnOnce(&mut Track)) -> Option<Track> {
+        let t = {
+            let mut tracks = self.tracks.write().unwrap();
+            let t = tracks.get_mut(id)?;
+            f(t);
+            t.clone()
+        };
+        if let Err(e) = self.store.put(Table::Tracks, id, &t) {
+            tracing::error!(id, "can't save a track: {e}");
+        }
+        self.notify(Change::Tracks);
+        Some(t)
+    }
+
+    /// Deletes a track. Its versions stay, as ordinary images.
+    pub fn delete_track(&self, id: &str) -> Result<(), String> {
+        let following = self.devices().iter().filter(|d| d.assignment.as_ref().is_some_and(|a| a.track.as_deref() == Some(id))).count();
+        if following > 0 {
+            return Err(format!("{following} machines follow {id}"));
+        }
+        self.store.delete(Table::Tracks, id).map_err(|e| e.to_string())?;
+        self.tracks.write().unwrap().remove(id);
+        self.notify(Change::Tracks);
+        Ok(())
     }
 
     // ---- Images ----
@@ -267,8 +377,24 @@ impl State {
         if in_use > 0 || s.default_image == id || s.pi_default_image == id {
             return Err(format!("{id:?} is in use ({in_use} assignments, or the default)"));
         }
+        // A version has to stay for as long as a machine might run it or come back to it.
+        let tracks: Vec<Track> = self.tracks().into_iter().filter(|t| t.versions.iter().any(|v| v.image == id)).collect();
+        if let Some(t) = tracks.iter().find(|t| t.current == id) {
+            return Err(format!("{id:?} is the current version of {}", t.id));
+        }
+        let needed = |d: &Device| {
+            d.last_boot.as_ref().is_some_and(|b| b.image == id) || d.moving.as_ref().is_some_and(|m| m.from == id || m.to == id)
+        };
+        if !tracks.is_empty()
+            && let Some(d) = self.devices().iter().find(|d| needed(d))
+        {
+            return Err(format!("{} is running {id:?}, or may go back to it", describe(d)));
+        }
         self.store.delete(Table::Images, id).map_err(|e| e.to_string())?;
         self.images.write().unwrap().remove(id);
+        for t in tracks {
+            self.edit_track(&t.id, |t| t.versions.retain(|v| v.image != id));
+        }
         self.notify(Change::Images);
         Ok(())
     }
@@ -370,6 +496,7 @@ impl State {
         if s.menu_timeout_secs != 0 && s.menu_timeout_secs < s.poll_secs * 2 {
             return Err("menu_timeout_secs must be 0 (never) or at least two poll intervals".into());
         }
+        crate::rollout::check_window(&s)?;
         self.store.put(Table::Meta, "settings", &s).map_err(|e| e.to_string())?;
         *self.settings.write().unwrap() = s;
         self.notify(Change::Settings);

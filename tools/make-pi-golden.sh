@@ -18,7 +18,10 @@
 # Then upload it, compressed so its zeros don't cross the network (`zstd out.img`, then
 # `curl -T out.img.zst -H 'Content-Encoding: zstd' http://<bootbob>:8067/api/disks/out.img`)
 # and make a BootBob Pi image: boot files out.img, copy-on-write on, command line
-#   console=ttyS0,115200 console=tty1 root=/dev/nbd0p2 nbdroot={server},out.img,nbd0 ip=dhcp NBDCLIENT=/usr/sbin/bootbob-nbd-client rootwait
+#   console=ttyS0,115200 console=tty1 root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp NBDCLIENT=/usr/sbin/bootbob-nbd-client bootbob.url={bootbob} rootwait
+# Name the file for its date (make-pi-golden.sh debian-trixie-rpi-arm64-20261108.img), since
+# an overlay is tied to one exact disk: a new build is a new file, for rollouts (see the
+# README). bootbob.url is how the bootbob-rollout timer finds BootBob.
 # No SSH keys built in? Put one in the boot partition before uploading, and the first
 # boot installs it for root: `mcopy -i out.img@@8M authorized_keys ::authorized_keys`.
 #
@@ -59,7 +62,8 @@ fi
 # hence --privileged. The container is thrown away afterwards. The script is one
 # single-quoted string, so no apostrophes in it, comments included.
 # shellcheck disable=SC2086
-docker run --rm --privileged --platform linux/arm64 -v "$OUTDIR:/out" -v "$WORK:/tools:ro" $KEYMOUNT \
+docker run --rm --privileged --platform linux/arm64 -v "$OUTDIR:/out" -v "$WORK:/tools:ro" \
+  -v "$(cd "$(dirname "$0")/machine" && pwd):/machine:ro" $KEYMOUNT \
   -e NAME="$NAME" -e SIZE_GIB="$SIZE_GIB" -e TEST_KERNEL="${TEST_KERNEL:-}" debian:trixie sh -euc '
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mmdebstrap dosfstools e2fsprogs fdisk mtools curl gnupg >/dev/null
@@ -85,7 +89,7 @@ gpg --show-keys --with-colons "$PIKEY" | grep -q "^fpr:*CF8A1AF502A2AA2D763BAE7E
 
 mmdebstrap --architectures=arm64 --variant=important \
   --setup-hook="mkdir -p \"\$1\$(dirname $PIKEY)\" && cp $PIKEY \"\$1$PIKEY\"" \
-  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,firmware-brcm80211,bluez-firmware,initramfs-tools,zstd,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates \
+  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,firmware-brcm80211,bluez-firmware,initramfs-tools,zstd,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates,curl \
   trixie "$ROOT" \
   "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware" \
   "deb http://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware" \
@@ -139,17 +143,14 @@ WantedBy=multi-user.target
 EOF
 # /proc: the raspi-firmware hooks use ischroot, which needs it to tell.
 mount -t proc proc "$ROOT/proc"
-chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved bootbob-first-boot >/dev/null
+install -m 0755 /machine/bootbob-rollout "$ROOT/usr/sbin/bootbob-rollout"
+install -m 0644 /machine/bootbob-rollout.service /machine/bootbob-rollout.timer "$ROOT/etc/systemd/system/"
+chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved bootbob-first-boot bootbob-rollout.timer >/dev/null
 printf "LANG=C.UTF-8\n" > "$ROOT/etc/default/locale"
-# Boot EEPROM updates arrive with apt like any Pi OS, and keep the EEPROM settings. Only
-# these boards have one, and nothing else (a VM) has anything to update.
-mkdir -p "$ROOT/etc/systemd/system/rpi-eeprom-update.service.d"
-cat > "$ROOT/etc/systemd/system/rpi-eeprom-update.service.d/boards.conf" <<EOF
-[Unit]
-ConditionFirmware=|device-tree-compatible(brcm,bcm2711)
-ConditionFirmware=|device-tree-compatible(brcm,bcm2712)
-EOF
-chroot "$ROOT" systemctl enable rpi-eeprom-update >/dev/null
+# The boot EEPROM is what makes a Pi netboot, and a rollout would apply a new one to every
+# Pi on the image at once, so changing it stays a deliberate act: the tool is here, the
+# service is not.
+chroot "$ROOT" systemctl mask rpi-eeprom-update >/dev/null
 
 install -m 0755 /tools/bootbob-nbd-client-aarch64 "$ROOT/usr/sbin/bootbob-nbd-client"
 install -m 0755 /tools/bootbob-nbd-client.hook "$ROOT/etc/initramfs-tools/hooks/bootbob-nbd-client"

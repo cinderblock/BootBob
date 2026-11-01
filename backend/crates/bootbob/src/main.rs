@@ -12,6 +12,7 @@ mod http;
 mod mdns;
 mod model;
 mod nbd;
+mod rollout;
 mod sparse;
 mod state;
 mod store;
@@ -164,6 +165,8 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+
+    tokio::spawn(rollout::run(st.clone()));
 
     let listener = tokio::net::TcpListener::bind(config.http).await.with_context(|| format!("HTTP: can't listen on {}", config.http))?;
     tracing::info!(addr = %config.http, "HTTP: listening");

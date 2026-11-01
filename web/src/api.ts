@@ -15,6 +15,22 @@ export interface Assignment {
   image: string;
   once: boolean;
   set_at?: Millis;
+  /** Follow this track: its rollouts move this machine, and may reboot it. */
+  track?: string;
+}
+
+/** A series of versions of one golden image, and the one machines following it should be on. */
+export interface Track {
+  id: string;
+  title: string;
+  current: string;
+  versions: { image: string; added_at: Millis }[];
+  halted: { at: Millis; why: string } | null;
+  blocked: string | null;
+  open_until: Millis | null;
+  // Computed by the server:
+  open: boolean;
+  next_window: Millis | null;
 }
 
 export interface Device {
@@ -46,6 +62,10 @@ export interface Device {
   pi_session: { image: string; started: Millis; last: Millis } | null;
   /** Its boot is held until a catalogue file has arrived. */
   waiting: { image: string; since: Millis; last: Millis; detail: string } | null;
+  /** The last time a running system checked in. */
+  check: { at: Millis; health: string; busy: string } | null;
+  /** Being moved between versions of its track. */
+  moving: { track: string; from: string; to: string; started: Millis; back: boolean } | null;
   // Computed by the server:
   code: string;
   state: "fetching" | "at_menu" | "menu_idle" | "pi_waiting" | "stuck" | "booted" | "seen";
@@ -150,6 +170,10 @@ export interface Settings {
   pi_default_image: string;
   poll_secs: number;
   menu_timeout_secs: number;
+  rollout_start: string;
+  rollout_minutes: number;
+  rollout_health_minutes: number;
+  time_zone: string;
   theme: Theme;
 }
 
@@ -208,6 +232,14 @@ export const api = {
   putImage: (img: Omit<Image, "builtin">) => call<Image>("PUT", `/api/images/${encodeURIComponent(img.id)}`, img),
   deleteImage: (id: string) => call<void>("DELETE", `/api/images/${encodeURIComponent(id)}`),
   piSources: () => call<PiSource[]>("GET", "/api/pi/sources"),
+  tracks: () => call<Track[]>("GET", "/api/tracks"),
+  putTrack: (id: string, title: string, image: string) =>
+    call<Track>("PUT", `/api/tracks/${encodeURIComponent(id)}`, { title, image }),
+  addVersion: (id: string, source: string) => call<Image>("POST", `/api/tracks/${encodeURIComponent(id)}/versions`, { source }),
+  releaseVersion: (id: string, image: string, now: boolean) =>
+    call<void>("POST", `/api/tracks/${encodeURIComponent(id)}/release`, { image, now }),
+  runTrack: (id: string) => call<void>("POST", `/api/tracks/${encodeURIComponent(id)}/run`),
+  haltTrack: (id: string) => call<void>("POST", `/api/tracks/${encodeURIComponent(id)}/halt`),
   overlays: (mac: string) => call<Overlay[]>("GET", `/api/devices/${mac}/overlays`),
   resetOverlay: (mac: string, source: string) => call<void>("DELETE", `/api/devices/${mac}/overlays/${encodeURIComponent(source)}`),
   catalogue: () => call<CatalogueOverview>("GET", "/api/catalogue"),
@@ -228,6 +260,7 @@ export type Change =
   | { what: "settings" }
   | { what: "event" }
   | { what: "catalogue" }
+  | { what: "tracks" }
   | { what: "resync" };
 
 export interface DoctorCheck {

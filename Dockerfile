@@ -22,7 +22,7 @@ RUN rustup target add aarch64-unknown-linux-musl \
     && mkdir -p /out/tools \
     && cp target/release/bootbob-nbd-client /out/tools/bootbob-nbd-client-x86_64 \
     && cp target/aarch64-unknown-linux-musl/release/bootbob-nbd-client /out/tools/bootbob-nbd-client-aarch64
-COPY tools/bootbob-nbd-client.hook /out/tools/
+COPY tools/bootbob-nbd-client.hook tools/machine/bootbob-rollout tools/machine/bootbob-rollout.service tools/machine/bootbob-rollout.timer /out/tools/
 
 FROM oven/bun:1 AS web
 WORKDIR /src/web

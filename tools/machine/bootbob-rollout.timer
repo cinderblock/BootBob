@@ -1,0 +1,10 @@
+[Unit]
+Description=Check in with BootBob every couple of minutes
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=2min
+RandomizedDelaySec=20s
+
+[Install]
+WantedBy=timers.target

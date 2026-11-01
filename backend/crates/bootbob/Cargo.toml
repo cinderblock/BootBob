@@ -23,6 +23,7 @@ axum.workspace = true
 bytes.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
+jiff.workspace = true
 libc.workspace = true
 lzma-rust2.workspace = true
 redb.workspace = true

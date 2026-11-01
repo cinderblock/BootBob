@@ -28,6 +28,7 @@ pub fn router(st: St) -> Router {
         .route("/boot/ipxe", get(boot_ipxe))
         .route("/boot/ipxe/chose", get(boot_chose))
         .route("/boot/disk/{image}/{*path}", get(disk_file))
+        .route("/boot/rollout", get(boot_rollout))
         .route("/files/usb/bootbob-usb.img", get(usb_stick))
         .route("/api/status", get(status))
         .route("/api/devices", get(list_devices))
@@ -37,6 +38,12 @@ pub fn router(st: St) -> Router {
         .route("/api/devices/{mac}/overlays/{source}", axum::routing::delete(reset_overlay))
         .route("/api/images", get(list_images))
         .route("/api/images/{id}", put(put_image).delete(delete_image))
+        .route("/api/tracks", get(list_tracks))
+        .route("/api/tracks/{id}", put(put_track).delete(delete_track))
+        .route("/api/tracks/{id}/versions", axum::routing::post(add_version))
+        .route("/api/tracks/{id}/release", axum::routing::post(release_version))
+        .route("/api/tracks/{id}/run", axum::routing::post(run_track))
+        .route("/api/tracks/{id}/halt", axum::routing::post(halt_track))
         .route("/api/pi/sources", get(pi_sources))
         .route("/api/store/allow", get(store_allow))
         .route("/api/disks", axum::routing::post(create_disk))
@@ -337,10 +344,30 @@ pub(crate) fn pc_action(st: &State, img: &Image, mac: Mac, base: &str) -> Option
         .cmdline
         .replace("{server}", &crate::stores::nbd_host(&st.config, &d.source, nbd_server(st, base)))
         .replace("{disk}", crate::stores::export_name(&d.source))
+        .replace("{bootbob}", base)
         .replace("{mac}", &dashed)
         .replace("{ip}", &ip);
     let initrds = if d.initrd.trim().is_empty() { vec![] } else { vec![url(d.initrd.trim())] };
     Some(bootbob_ipxe::Action::Kernel { kernel: url(d.kernel.trim()), initrds, cmdline })
+}
+
+#[derive(Deserialize)]
+struct RolloutQuery {
+    mac: String,
+    #[serde(default)]
+    health: String,
+    #[serde(default)]
+    busy: String,
+}
+
+/// A running machine checking in: one word back, for a shell script. Anything else it gets,
+/// or nothing, means stay.
+async fn boot_rollout(Ax(st): Ax<St>, Query(q): Query<RolloutQuery>) -> Response {
+    let answer = match q.mac.parse::<Mac>() {
+        Ok(mac) => crate::rollout::check(&st, mac, &q.health, &q.busy),
+        Err(_) => crate::rollout::STAY,
+    };
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], format!("{answer}\n")).into_response()
 }
 
 #[derive(Deserialize)]
@@ -587,6 +614,68 @@ async fn put_image(Ax(st): Ax<St>, Path(id): Path<String>, Json(mut img): Json<I
     img.id = id;
     st.put_image(img.clone()).map_err(bad)?;
     Ok(Json(img))
+}
+
+async fn list_tracks(Ax(st): Ax<St>) -> Json<Vec<crate::rollout::TrackView>> {
+    Json(st.tracks().into_iter().map(|t| crate::rollout::view(&st, t)).collect())
+}
+
+#[derive(Deserialize)]
+struct TrackBody {
+    title: String,
+    /// The image a new track starts from.
+    image: Option<String>,
+}
+
+async fn put_track(Ax(st): Ax<St>, Path(id): Path<String>, Json(b): Json<TrackBody>) -> Result<Json<Track>, ApiError> {
+    st.put_track(&id, &b.title, b.image.as_deref()).map(Json).map_err(bad)
+}
+
+async fn delete_track(Ax(st): Ax<St>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    st.track(&id).ok_or_else(|| not_found("track"))?;
+    st.delete_track(&id).map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct NewVersion {
+    /// A disk image, as an image's source names it: `uberfall:golden-20261108.img`.
+    source: String,
+    title: Option<String>,
+}
+
+async fn add_version(Ax(st): Ax<St>, Path(id): Path<String>, Json(v): Json<NewVersion>) -> Result<Json<Image>, ApiError> {
+    tokio::task::spawn_blocking(move || crate::rollout::add_version(&st, &id, &v.source, v.title))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .map_err(bad)
+}
+
+#[derive(Deserialize)]
+struct Release {
+    image: String,
+    /// Move machines now rather than at the next window.
+    #[serde(default)]
+    now: bool,
+}
+
+/// Makes a version current: how a rollback is done.
+async fn release_version(Ax(st): Ax<St>, Path(id): Path<String>, Json(r): Json<Release>) -> Result<StatusCode, ApiError> {
+    crate::rollout::release(&st, &id, &r.image, r.now).map_err(bad)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn run_track(Ax(st): Ax<St>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    crate::rollout::run_now(&st, &id).map_err(bad)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Stops a track moving any more machines. One already rebooting carries on.
+async fn halt_track(Ax(st): Ax<St>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    st.track(&id).ok_or_else(|| not_found("track"))?;
+    crate::rollout::halt(&st, &id, "stopped by hand");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_overlays(Ax(st): Ax<St>, Path(mac): Path<String>) -> Result<Json<Vec<crate::nbd::OverlayInfo>>, ApiError> {

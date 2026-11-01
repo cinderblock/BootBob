@@ -1,0 +1,37 @@
+#!/bin/sh
+# Checks in with BootBob, which decides everything: when a machine moves to a new version of
+# its image, and whether it came back healthy. This only says how the machine is and does as
+# it's told. Any failure means stay.
+#
+# BootBob's URL comes from the kernel command line (bootbob.url={bootbob}). A machine without
+# it isn't part of any rollout, and this does nothing.
+#
+# /etc/bootbob/busy, if it's there and executable, is asked first: anything it prints means
+# this machine mustn't reboot now. That's where an image says a job is running.
+set -u
+
+url=$(sed -n 's/.*bootbob\.url=\([^ ]*\).*/\1/p' /proc/cmdline)
+[ -n "$url" ] || exit 0
+
+# The interface the root is behind: the one with the default route.
+dev=$(ip -4 route show default | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)
+[ -n "$dev" ] || exit 0
+mac=$(cat "/sys/class/net/$dev/address") || exit 0
+
+busy=
+if [ -n "$(loginctl list-sessions --no-legend 2>/dev/null | grep -v ' manager' || true)" ]; then
+  busy=login
+elif pgrep -x 'apt|apt-get|dpkg|unattended-upgr' >/dev/null 2>&1; then
+  busy=apt
+elif [ -x /etc/bootbob/busy ]; then
+  busy=$(/etc/bootbob/busy 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9 ._-')
+fi
+
+health=$(systemctl is-system-running 2>/dev/null || true)
+answer=$(curl -fsS -m 20 -G "$url/boot/rollout" --data-urlencode "mac=$mac" \
+  --data-urlencode "health=$health" --data-urlencode "busy=$busy") || exit 0
+
+if [ "$answer" = reboot ] && [ -z "$busy" ]; then
+  echo "BootBob says to reboot onto a new version"
+  systemctl reboot
+fi

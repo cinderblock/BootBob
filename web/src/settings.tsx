@@ -10,6 +10,8 @@ const themeFields: { key: keyof Theme; label: string }[] = [
   { key: "accent", label: "Accent" },
 ];
 
+const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 export function SettingsView({ live }: { live: Live }) {
   const [s, setS] = useState<Settings | null>(live.settings);
   const [saved, setSaved] = useState<string | null>(null);
@@ -87,6 +89,39 @@ export function SettingsView({ live }: { live: Live }) {
             onInput={(e) => setS({ ...s, menu_timeout_secs: Number(e.currentTarget.value) })}
           />{" "}
           seconds (0: wait forever)
+        </label>
+
+        <h2>Rollouts</h2>
+        <label title="Machines following a track move to a new version one at a time in this window, every day.">
+          Machines may move to a new version from{" "}
+          <input type="time" value={s.rollout_start} onInput={(e) => setS({ ...s, rollout_start: e.currentTarget.value })} /> for{" "}
+          <input
+            type="number"
+            min={1}
+            max={1440}
+            value={s.rollout_minutes}
+            onInput={(e) => setS({ ...s, rollout_minutes: Number(e.currentTarget.value) })}
+          />{" "}
+          minutes
+        </label>
+        <label title="Past this, the machine goes back to the version it came from and the rollout stops. Set it longer than its slowest healthy boot.">
+          A machine has{" "}
+          <input
+            type="number"
+            min={1}
+            max={240}
+            value={s.rollout_health_minutes}
+            onInput={(e) => setS({ ...s, rollout_health_minutes: Number(e.currentTarget.value) })}
+          />{" "}
+          minutes to come back healthy
+        </label>
+        <label>
+          In the time zone <input value={s.time_zone} onInput={(e) => setS({ ...s, time_zone: e.currentTarget.value })} />{" "}
+          {s.time_zone !== browserZone && (
+            <button type="button" className="secondary" onClick={() => setS({ ...s, time_zone: browserZone })}>
+              Use {browserZone}
+            </button>
+          )}
         </label>
 
         <h2>Theme</h2>

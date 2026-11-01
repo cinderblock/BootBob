@@ -42,6 +42,8 @@ mdns-sd = { version = "0.21", default-features = false }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 redb = "4"
 # Compressed disk images, uploaded or downloaded. Pure Rust, like all that parses them.
+# "5 AM local" across daylight saving. Its own time zone data: the container has none.
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz", "optimization", "encoder"] }
 ruzstd = "0.9"

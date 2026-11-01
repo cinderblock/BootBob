@@ -39,3 +39,9 @@ booted the one-shot test image a second time; the event log shows `start4.elf` s
 old image, with no new `Booting` line. A reboot after 60 s worked. It matters because a one-shot
 boot runs twice, and a machine told to leave an image can stay on it. The DHCP listener's
 `Started a network boot` event fired at the time, so a new boot was visible.
+## A new version of a golden image gives a machine a new identity
+
+A machine moving to a new version comes up on a fresh root, so `bootbob-first-boot` makes new SSH
+host keys and a new machine-id each time (the Pi image; the PC image shares one set across every
+copy, which is its own problem). `known_hosts` complains after every rollout. Keeping a machine's
+identity across versions needs somewhere for it to live outside the root.
