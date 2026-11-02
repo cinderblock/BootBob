@@ -79,8 +79,9 @@ version() { # name
   debugfs -w -R "mkdir /root/.ssh" "$img?offset=$root" >/dev/null 2>&1 || true
   debugfs -w -R "rm /root/.ssh/authorized_keys" "$img?offset=$root" >/dev/null 2>&1 || true
   fs "$img" "write $key.pub /root/.ssh/authorized_keys"
-  # An empty value clears every timer in the section, OnBootSec included.
-  printf '[Timer]\nOnUnitActiveSec=\nOnBootSec=15s\nOnUnitActiveSec=15s\nRandomizedDelaySec=2s\n' >"$work/fast.conf"
+  # An empty value clears every timer in the section, OnBootSec included. AccuracySec: by
+  # default systemd may run a timer up to a minute late.
+  printf '[Timer]\nOnUnitActiveSec=\nOnBootSec=15s\nOnUnitActiveSec=15s\nRandomizedDelaySec=2s\nAccuracySec=1s\n' >"$work/fast.conf"
   fs "$img" "mkdir /etc/systemd/system/bootbob-rollout.timer.d"
   fs "$img" "write $work/fast.conf /etc/systemd/system/bootbob-rollout.timer.d/fast.conf"
 }
@@ -229,9 +230,9 @@ ok "idle again, machine 0 took its turn"
 
 say "a login counts as busy"
 ip=$(dev "${macs[1]}" | jq -r .ip)
-ssh -q -i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes "root@$ip" 'sleep 40' &
+ssh -q -i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes "root@$ip" 'sleep 75' &
 session=$!
-wait_dev "${macs[1]}" '.check.busy == "login"' 35 "a login wasn't reported"
+wait_dev "${macs[1]}" '.check.busy == "login"' 70 "a login wasn't reported"
 wait "$session"
 ok "a session open on machine 1 was reported"
 
