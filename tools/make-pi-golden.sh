@@ -147,10 +147,15 @@ install -m 0755 /machine/bootbob-rollout "$ROOT/usr/sbin/bootbob-rollout"
 install -m 0644 /machine/bootbob-rollout.service /machine/bootbob-rollout.timer "$ROOT/etc/systemd/system/"
 chroot "$ROOT" systemctl enable systemd-networkd systemd-resolved bootbob-first-boot bootbob-rollout.timer >/dev/null
 printf "LANG=C.UTF-8\n" > "$ROOT/etc/default/locale"
-# The boot EEPROM is what makes a Pi netboot, and a rollout would apply a new one to every
-# Pi on the image at once, so changing it stays a deliberate act: the tool is here, the
-# service is not.
-chroot "$ROOT" systemctl mask rpi-eeprom-update >/dev/null
+# Boot EEPROM updates arrive with apt like any Pi OS, and keep the EEPROM settings. Only
+# these boards have one, and nothing else (a VM) has anything to update.
+mkdir -p "$ROOT/etc/systemd/system/rpi-eeprom-update.service.d"
+cat > "$ROOT/etc/systemd/system/rpi-eeprom-update.service.d/boards.conf" <<EOF
+[Unit]
+ConditionFirmware=|device-tree-compatible(brcm,bcm2711)
+ConditionFirmware=|device-tree-compatible(brcm,bcm2712)
+EOF
+chroot "$ROOT" systemctl enable rpi-eeprom-update >/dev/null
 
 install -m 0755 /tools/bootbob-nbd-client-aarch64 "$ROOT/usr/sbin/bootbob-nbd-client"
 install -m 0755 /tools/bootbob-nbd-client.hook "$ROOT/etc/initramfs-tools/hooks/bootbob-nbd-client"
