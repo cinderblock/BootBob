@@ -155,7 +155,7 @@ curl -X POST -H 'content-type: application/json' -d '{"source": "uberfall:golden
   http://<bootbob>:8067/api/tracks/golden/versions
 ```
 
-The rest happens in the daily window (Settings, 05:00 for an hour by default; set your time zone).
+The rest happens in the daily window (Settings, 05:00 for an hour by default, in the time zone DHCP gives as option 101, or the one you set there, else UTC).
 The **Rollouts** tab shows it, and can run a rollout now, stop one or go back.
 
 **How a machine moves.** BootBob can't reboot anything, so each machine's timer asks

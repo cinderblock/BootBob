@@ -174,6 +174,7 @@ export interface Settings {
   rollout_minutes: number;
   rollout_health_minutes: number;
   time_zone: string;
+  network_time_zone: string | null;
   theme: Theme;
 }
 

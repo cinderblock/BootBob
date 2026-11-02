@@ -107,6 +107,24 @@ async fn window_settings_are_checked() {
 }
 
 #[tokio::test]
+async fn an_empty_time_zone_means_the_networks() {
+    let t = setup();
+    assert_eq!(t.st.window_settings().time_zone, "UTC", "nothing known yet");
+
+    t.st.set_network_zone("America/Los_Angeles".into());
+    assert_eq!(t.st.window_settings().time_zone, "America/Los_Angeles");
+    let mut s = json(&t.st, "/api/settings").await;
+    assert_eq!(s["time_zone"], "", "the setting itself stays empty");
+    assert_eq!(s["network_time_zone"], "America/Los_Angeles");
+
+    // A setting beats the network, and what the UI sends back doesn't become one.
+    s["time_zone"] = json!("Europe/Paris");
+    assert_eq!(call(&t.st, Method::PUT, "/api/settings", Some(s)).await.0, StatusCode::OK);
+    assert_eq!(t.st.window_settings().time_zone, "Europe/Paris");
+    assert_eq!(t.st.network_zone().as_deref(), Some("America/Los_Angeles"));
+}
+
+#[tokio::test]
 async fn only_disposable_roots_get_on_a_track() {
     let t = setup();
     pc_disk(&t, "pet.img");

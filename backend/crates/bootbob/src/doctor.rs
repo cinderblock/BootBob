@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bootbob_dhcp::{Firmware, Mac, probe};
@@ -20,6 +21,10 @@ use crate::tftp::ipxe_file;
 /// How long to collect offers for. dnsmasq pings an address for about 3 s before
 /// offering it; leave room for that and a slow gateway.
 const PROBE_WAIT: Duration = Duration::from_secs(8);
+/// How often to ask the network for its time zone.
+const ZONE_EVERY: Duration = Duration::from_secs(3600);
+/// One made-up MAC for those, so they don't leave a trail of them on the DHCP server.
+const ZONE_PROBE: u32 = 101;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +58,7 @@ pub struct Offer {
     pub src_mac: Mac,
     pub boot_server: Option<String>,
     pub boot_file: Option<String>,
+    pub time_zone: Option<String>,
 }
 
 impl Offer {
@@ -154,6 +160,62 @@ fn our_address(st: &State) -> Option<String> {
     let url = st.config.public_url.as_deref()?;
     let host = url.split("://").nth(1)?.split(['/', ':']).next()?;
     host.parse::<Ipv4Addr>().ok().map(|ip| ip.to_string())
+}
+
+/// The time zone `offers` give, if they agree on one that exists. A mistyped or disputed
+/// zone isn't used: it would move the hour machines reboot.
+pub fn offered_zone(offers: &[Offer]) -> Option<String> {
+    let mut zones = offers.iter().filter_map(|o| o.time_zone.as_ref());
+    let first = zones.next()?;
+    (zones.all(|z| z == first) && jiff::tz::TimeZone::get(first).is_ok()).then(|| first.clone())
+}
+
+/// Judges the time zones offered. Giving none isn't a fault: `time_zone` in the settings
+/// does the same job.
+pub fn evaluate_zone(offers: &[Offer]) -> Check {
+    let title = "The network gives a time zone";
+    let zones: BTreeSet<&str> = offers.iter().filter_map(|o| o.time_zone.as_deref()).collect();
+    match (zones.is_empty(), offered_zone(offers)) {
+        (true, _) => check("time-zone", title, Status::Skip, "No DHCP server gives one (option 101).", None),
+        (_, Some(z)) => check("time-zone", title, Status::Ok, format!("{z}, over DHCP option 101."), None),
+        _ => check(
+            "time-zone",
+            title,
+            Status::Warn,
+            format!(
+                "Option 101 says {}, which isn't one real time zone, so it's ignored.",
+                zones.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+            Some("Give one tz database name, such as America/Los_Angeles, on one DHCP server.".into()),
+        ),
+    }
+}
+
+/// Asks the network for its time zone, now and every hour, for as long as BootBob runs.
+pub async fn watch_zone(st: Arc<State>) {
+    // Let the listener start: it hears the answer.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    loop {
+        learn_zone(&st).await;
+        tokio::time::sleep(ZONE_EVERY).await;
+    }
+}
+
+async fn learn_zone(st: &State) {
+    let listener = st.listener.read().unwrap().clone();
+    let (Some(iface), true) = (listener.interface, listener.running) else { return };
+    // Clear of the two ids `run` takes from the same clock.
+    let xid = (now_ms() as u32).wrapping_add(2);
+    st.expect_probe(xid);
+    if let Err(e) = probe::send(&iface, &probe::discover(xid, probe::probe_mac(ZONE_PROBE), Firmware::EfiX64)) {
+        st.take_probe(xid);
+        tracing::debug!("can't ask for the time zone: {e}");
+        return;
+    }
+    tokio::time::sleep(PROBE_WAIT).await;
+    if let Some(zone) = offered_zone(&st.take_probe(xid)) {
+        st.set_network_zone(zone);
+    }
 }
 
 pub async fn run(st: &State) -> Report {
@@ -262,6 +324,10 @@ pub async fn run(st: &State) -> Report {
             }
             if !all.is_empty() {
                 checks.push(evaluate_rogue(&all));
+                checks.push(evaluate_zone(&all));
+                if let Some(zone) = offered_zone(&all) {
+                    st.set_network_zone(zone);
+                }
             }
         }
         None => checks.push(check(
@@ -304,7 +370,33 @@ mod tests {
             src_mac: Mac([2; 6]),
             boot_server: boot_server.map(Into::into),
             boot_file: file.map(Into::into),
+            time_zone: None,
         }
+    }
+
+    fn zoned(server: [u8; 4], zone: &str) -> Offer {
+        Offer { time_zone: Some(zone.into()), ..offer(server, None, None) }
+    }
+
+    #[test]
+    fn a_zone_is_used_only_if_real_and_undisputed() {
+        let la = zoned([10, 255, 0, 1], "America/Los_Angeles");
+        assert_eq!(offered_zone(&[la.clone(), la.clone()]).as_deref(), Some("America/Los_Angeles"));
+        assert_eq!(offered_zone(&[la.clone(), offer([10, 255, 0, 2], None, None)]).as_deref(), Some("America/Los_Angeles"));
+        assert_eq!(offered_zone(&[offer([10, 255, 0, 1], None, None)]), None);
+        assert_eq!(offered_zone(&[zoned([10, 255, 0, 1], "Mars/Base")]), None);
+        assert_eq!(offered_zone(&[la, zoned([10, 255, 0, 2], "Europe/Paris")]), None);
+    }
+
+    #[test]
+    fn a_missing_zone_is_no_fault_and_a_bad_one_is_a_warning() {
+        assert_eq!(evaluate_zone(&[offer([10, 255, 0, 1], None, None)]).status, Status::Skip);
+        let good = evaluate_zone(&[zoned([10, 255, 0, 1], "America/Los_Angeles")]);
+        assert_eq!(good.status, Status::Ok);
+        assert!(good.detail.contains("America/Los_Angeles"));
+        let bad = evaluate_zone(&[zoned([10, 255, 0, 1], "PST")]);
+        assert_eq!(bad.status, Status::Warn);
+        assert!(bad.detail.contains("PST"));
     }
 
     #[test]

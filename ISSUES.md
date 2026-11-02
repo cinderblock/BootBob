@@ -39,6 +39,14 @@ booted the one-shot test image a second time; the event log shows `start4.elf` s
 old image, with no new `Booting` line. A reboot after 60 s worked. It matters because a one-shot
 boot runs twice, and a machine told to leave an image can stay on it. The DHCP listener's
 `Started a network boot` event fired at the time, so a new boot was visible.
+## Golden images don't take the time zone from DHCP
+
+BootBob reads option 101, but a machine on a golden image stays on UTC. The Pi image would need
+`UseTimezone=yes` under `[DHCPv4]`, and networkd sets it through timedated, so it probably needs
+`polkit` and `tzdata` too, which the image doesn't ask for by name. Untested. The PC image runs no
+network manager at all: the initrd's `ip=dhcp` configures the interface. Rollouts don't depend on this:
+the window is the host's. It matters only for local time on the machines.
+
 ## A new version of a golden image gives a machine a new identity
 
 A machine moving to a new version comes up on a fresh root, so `bootbob-first-boot` makes new SSH

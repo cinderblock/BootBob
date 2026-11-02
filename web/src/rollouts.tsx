@@ -29,7 +29,7 @@ export function Rollouts({ live, now }: { live: Live; now: number }) {
       </div>
       <p className="muted">
         A track is a series of versions of one golden image. Machines that follow one move to its current version one at a time, in the
-        daily window ({s ? `${s.rollout_start} ${s.time_zone}, ${s.rollout_minutes} min` : "…"}), stopping at the first that doesn't come
+        daily window ({s ? `${s.rollout_start} ${s.time_zone || s.network_time_zone || "UTC"}, ${s.rollout_minutes} min` : "…"}), stopping at the first that doesn't come
         back healthy. Their overlays are never reset: each version has its own, so going back brings a machine's state back with it.
       </p>
       {error && <p className="error">{error}</p>}

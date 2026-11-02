@@ -24,7 +24,26 @@ fn pxe_options(m: &mut Message, firmware: Firmware) {
     m.set_opt(OPT_VENDOR_CLASS, format!("PXEClient:Arch:{arch:05}:UNDI:003016").into_bytes());
     m.set_opt(
         OPT_PARAMS,
-        [1, 3, 6, OPT_VENDOR_INFO, OPT_SERVER_ID, OPT_VENDOR_CLASS, OPT_SERVER_NAME, OPT_BOOTFILE, 128, 129, 130, 131, 132, 133, 134, 135],
+        // Beyond what a PXE ROM asks: the time zone, which servers send only when asked.
+        [
+            1,
+            3,
+            6,
+            OPT_VENDOR_INFO,
+            OPT_SERVER_ID,
+            OPT_VENDOR_CLASS,
+            OPT_SERVER_NAME,
+            OPT_BOOTFILE,
+            OPT_TZ_NAME,
+            128,
+            129,
+            130,
+            131,
+            132,
+            133,
+            134,
+            135,
+        ],
     );
 }
 
@@ -101,6 +120,12 @@ mod tests {
         assert_eq!(m.vendor_class().as_deref(), Some("PXEClient:Arch:00007:UNDI:003016"));
         assert!(m.broadcast());
         assert_eq!(m.mac().unwrap().to_string(), "02:62:62:00:00:01");
+    }
+
+    #[test]
+    fn asks_for_the_time_zone() {
+        let m = Message::parse(&discover(9, probe_mac(1), Firmware::EfiX64).encode()).unwrap();
+        assert!(m.opt(OPT_PARAMS).unwrap().contains(&OPT_TZ_NAME));
     }
 
     #[test]
