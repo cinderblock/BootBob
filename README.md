@@ -144,8 +144,8 @@ a machine on the same image that doesn't follow it is left alone. Only copy-on-w
 versions, so a plain disk can't get on a track. Machines like that update themselves.
 
 **Set up.** A version's command line has to use `{disk}` and `bootbob.url={bootbob}`, which is how
-a machine's check-in timer finds BootBob. Golden images from `tools/make-pi-golden.sh` and
-`tools/make-pc-golden.sh` have the timer. On a machine of your own, install `bootbob-rollout`,
+a machine's check-in timer finds BootBob. Golden images from `tools/make-pi-golden.sh`,
+`tools/make-pios-golden.sh` and `tools/make-pc-golden.sh` have the timer. On a machine of your own, install `bootbob-rollout`,
 `bootbob-rollout.service` and `bootbob-rollout.timer` from `/files/tools/`.
 
 ```sh
@@ -283,7 +283,8 @@ store computes. Only the main server's address may read a whole disk from a stor
 A stock Raspberry Pi OS image downloads, verifies and serves its boot files over TFTP, but
 its initramfs has no NBD client, so it can't run its root from the network as it is. The same
 goes for cloud images, which also keep their kernels off the FAT partition.
-`tools/make-pi-golden.sh` and `tools/make-pc-golden.sh` build images that can.
+`tools/make-pi-golden.sh`, `tools/make-pios-golden.sh` (Pi OS Lite itself, made to run from
+the network) and `tools/make-pc-golden.sh` build images that can.
 
 ## A USB boot stick, and finding BootBob on the network
 
@@ -328,7 +329,7 @@ Without a config, BootBob serves HTTP on `:8067` and TFTP on `:69` from `./data`
 | `web/` | The web UI: Preact (via preact/compat), Vite, TypeScript, Bun |
 | `ipxe/` | iPXE build: pinned commit, embedded script, build options |
 | `e2e/` | End-to-end test: SeaBIOS and OVMF VMs netboot from BootBob in QEMU |
-| `tools/` | `pi-clone-to-nbd.sh`: clone a running Pi onto a BootBob NBD disk, to run it diskless. `make-pc-golden.sh`: build a Debian disk image a PC runs from over the network. `make-pi-golden.sh`: the same for Raspberry Pis, from packages (CI builds it, boots it in a VM with `test-pi-golden.sh`, and keeps it as an artifact). `test-trim.sh`: proves TRIM on a real kernel, in a throwaway container |
+| `tools/` | `pi-clone-to-nbd.sh`: clone a running Pi onto a BootBob NBD disk, to run it diskless. `make-pc-golden.sh`: build a Debian disk image a PC runs from over the network. `make-pi-golden.sh`: the same for Raspberry Pis, from packages (CI builds it, boots it in a VM with `test-pi-golden.sh`, and keeps it as an artifact). `make-pios-golden.sh`: the official Raspberry Pi OS Lite image, changed only as a network root needs, for machines that want Pi OS itself (CI builds and tests it the same way, with `test-pios-golden.sh`). `test-trim.sh`: proves TRIM on a real kernel, in a throwaway container |
 
 ## Development
 
