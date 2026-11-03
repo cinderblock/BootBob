@@ -105,6 +105,10 @@ if [ "${1:-}" = --inside ]; then
   # partition: without it a machine still comes up, to be fixed.
   printf "proc\t/proc\tproc\tdefaults\t0\t0\n/dev/nbd0p1\t/boot/firmware\tvfat\tdefaults,nofail\t0\t2\n/dev/nbd0p2\t/\text4\tdefaults,noatime\t0\t1\n" > "$R/etc/fstab"
   grep -qx nbd "$R/etc/initramfs-tools/modules" || echo nbd >> "$R/etc/initramfs-tools/modules"
+  # Pi OS builds its initramfs with MODULES=dep: only what the machine building it needs.
+  # Built here, that would be this container's host, not a Pi, so take them all.
+  printf "# One image for every Pi it boots: dep would fit the initramfs to the build host.\nMODULES=most\n" \
+    > "$R/etc/initramfs-tools/conf.d/bootbob-modules"
   install -m 0755 /tools/bootbob-nbd-client-aarch64 "$R/usr/sbin/bootbob-nbd-client"
   install -m 0755 /tools/bootbob-nbd-client.hook "$R/etc/initramfs-tools/hooks/bootbob-nbd-client"
 
@@ -177,11 +181,11 @@ EOF
     cp -a "$R" /work/testroot
     T=/work/testroot
     printf "virtio_pci\nvirtio_net\nvfat\nnls_cp437\nnls_ascii\n" >> "$T/etc/initramfs-tools/modules"
-    for m in proc sys dev; do mount --bind "/$m" "$T/$m"; done
+    for m in proc sys dev dev/pts; do mount --bind "/$m" "$T/$m"; done
     rm -f "$T/etc/resolv.conf"
     cp /etc/resolv.conf "$T/etc/resolv.conf"
     chroot "$T" sh -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq linux-image-arm64" >/dev/null
-    for m in dev sys proc; do umount "$T/$m"; done
+    for m in dev/pts dev sys proc; do umount "$T/$m"; done
     KVER=$(ls "$T/boot" | sed -n "s/^vmlinuz-\(.*-arm64\)$/\1/p" | sort -V | tail -1)
     cp "$T/boot/vmlinuz-$KVER" "/out/$NAME.test-vmlinuz"
     cp "$T/boot/initrd.img-$KVER" "/out/$NAME.test-initrd"
