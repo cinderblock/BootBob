@@ -29,7 +29,7 @@
 # http://<bootbob>:8067/api/disks/out.img`) and make a BootBob Pi image: boot files out.img,
 # copy-on-write on, command line
 #   console=serial0,115200 console=tty1 root=/dev/nbd0p2 nbdroot={server},{disk},nbd0 ip=dhcp NBDCLIENT=/usr/sbin/bootbob-nbd-client bootbob.url={bootbob} rootwait
-# Name the file for what it is and its date (raspios-trixie-arm64-20261108.img): an overlay
+# Name the file for what it is and its date (raspios-lite-trixie-arm64-20261108.img): an overlay
 # is tied to one exact disk. No SSH key built in? Add one to the boot partition before
 # uploading: `mcopy -i out.img@@8M authorized_keys ::authorized_keys`. Hardware settings
 # (I2C, 1-Wire, ...) go in a machine's own config.txt, which lives in its overlay.

@@ -1,6 +1,6 @@
-name: Pi OS golden image
+name: Pi OS Lite golden image
 
-# Builds the Raspberry Pi OS golden image (the official Lite image, made to run from BootBob)
+# Builds the Raspberry Pi OS Lite golden image (the official Lite image, made to run from BootBob)
 # natively on an arm64 runner and boots it in a VM over NBD (tools/test-pios-golden.sh). The
 # image has no credentials in it, so it can be an artifact: put your own authorized_keys in
 # its boot partition before uploading it to BootBob (see tools/make-pios-golden.sh).
@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Name this build
-        run: echo "NAME=raspios-trixie-arm64-$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+        run: echo "NAME=raspios-lite-trixie-arm64-$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
       - name: Fetch bootbob-nbd-client from the latest published BootBob
         run: |
           # An amd64 image, but the tools are only copied out, never run here.
