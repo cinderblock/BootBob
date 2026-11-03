@@ -10,7 +10,7 @@ name: Pi OS Lite golden image
 
 on:
   push:
-    branches: [master, pios-golden]
+    branches: [master]
     paths:
       - tools/make-pios-golden.sh
       - tools/test-pios-golden.sh
