@@ -14,8 +14,8 @@
 # What changes from the official image:
 #   - its root filesystem is grown to size-GiB (default 32), and boots from /dev/nbd0 with
 #     bootbob-nbd-client in the initramfs, so the root survives BootBob restarting;
-#   - packages are upgraded, and git and btop added; cron is removed, since systemd's timers
-#     do its job;
+#   - packages are upgraded, and git, btop and libnss-myhostname added; cron is removed,
+#     since systemd's timers do its job;
 #   - the user is pi, as Pi OS always had: SSH keys only (no password), sudo without one,
 #     with the Pi OS groups. The first boot installs /boot/firmware/authorized_keys for pi;
 #   - SSH is on, with host keys made on each machine's first boot (Pi OS does that already);
@@ -91,7 +91,8 @@ if [ "${1:-}" = --inside ]; then
 
   ch apt-get update -qq
   ch apt-get full-upgrade -y -qq -o Dpkg::Options::=--force-confold >/dev/null
-  ch apt-get install -y -qq nbd-client git btop >/dev/null
+  # libnss-myhostname: a machine always resolves its own name, even one DHCP gave it.
+  ch apt-get install -y -qq nbd-client git btop libnss-myhostname >/dev/null
   # Only cron itself may go: anything else apt would take with it fails the build.
   ch apt-get purge -s cron cron-daemon-common | sed -n "s/^Purg \([^ ]*\).*/\1/p" | sort > /work/purge
   printf "cron\ncron-daemon-common\n" | sort | cmp -s - /work/purge || {

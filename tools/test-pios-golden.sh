@@ -79,7 +79,7 @@ check "pi logs in with the key, has bash and no password, and sudo needs none" '
 check "pi has the Pi OS groups" 'id -nG | tr " " "\n" | grep -cxE "gpio|i2c|spi|dialout|video|sudo" | grep -x 6'
 check "first boot made SSH host keys" 'test -s /etc/ssh/ssh_host_ed25519_key.pub && ls /etc/ssh/ssh_host_ed25519_key.pub'
 check "machine-id exists" 'grep -qE "^[0-9a-f]{32}$" /etc/machine-id && cat /etc/machine-id'
-check "no hostname built in" 'test ! -e /etc/hostname -o "$(cat /etc/hostname 2>/dev/null)" != raspberrypi && hostname'
+check "no hostname built in, and it resolves" 'test ! -e /etc/hostname && getent hosts "$(hostname)" && ! sudo -n true 2>&1 | grep -q "unable to resolve"'
 # Pi OS's swap (zram, backed by a file on a loop device) needs the loop and zram modules, and
 # the test kernel's modules aren't in the image: the Pi kernel's are. On a Pi it starts.
 check "no failed units, but the VM-only swap ones" 'f=$(systemctl --failed --no-legend --plain | awk "{print \$1}" | grep -vE "^(rpi-setup-loop@var-swap\.service|systemd-zram-setup@zram0\.service|dev-zram0\.swap)$" || true); test -z "$f" || { systemctl --failed --no-pager; exit 1; }'
@@ -93,6 +93,7 @@ check "the Pi kernels are in the boot partition" 'ls /boot/firmware/kernel8.img 
 check "the boot partition's initramfs has bootbob-nbd-client" 'lsinitramfs /boot/firmware/initramfs8 | grep -q usr/sbin/bootbob-nbd-client && echo yes'
 
 echo "== restarting the NBD server under a writing machine"
+vm 'sudo -n sync'
 vm 'nohup sh -c "i=0; while [ \$i -lt 60 ]; do echo \$i >> /var/tmp/writes; sync; i=\$((i + 1)); sleep 1; done" >/dev/null 2>&1 &'
 sleep 5
 kill "$NBD_PID"
