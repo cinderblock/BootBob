@@ -70,7 +70,7 @@ check() {
   vm "$@" >"$WORK/out" 2>&1 || { cat "$WORK/out" >&2; fail "$what"; }
   echo "ok: $what: $(tr '\n' ' ' <"$WORK/out")"
 }
-check "it is Pi OS" 'grep -q "Raspberry Pi" /etc/apt/sources.list.d/raspi.sources && dpkg -s raspberrypi-sys-mods raspi-config network-manager >/dev/null && echo yes'
+check "it is Pi OS" 'grep -q archive.raspberrypi.com /etc/apt/sources.list.d/raspi.sources && dpkg -s raspberrypi-sys-mods raspi-config network-manager >/dev/null && echo yes'
 check "root is the NBD disk, read-write" 'findmnt -no SOURCE,OPTIONS / | grep -E "^/dev/nbd0p2 +rw"'
 check "boot partition is mounted" 'findmnt -no SOURCE /boot/firmware | grep -x /dev/nbd0p1'
 check "the root filesystem was grown" 'df -BG --output=size / | tail -1 | tr -d " G" | awk "{ exit !(\$1 > 20) }" && df -h --output=size / | tail -1'
@@ -80,7 +80,9 @@ check "pi has the Pi OS groups" 'id -nG | tr " " "\n" | grep -cxE "gpio|i2c|spi|
 check "first boot made SSH host keys" 'test -s /etc/ssh/ssh_host_ed25519_key.pub && ls /etc/ssh/ssh_host_ed25519_key.pub'
 check "machine-id exists" 'grep -qE "^[0-9a-f]{32}$" /etc/machine-id && cat /etc/machine-id'
 check "no hostname built in" 'test ! -e /etc/hostname -o "$(cat /etc/hostname 2>/dev/null)" != raspberrypi && hostname'
-check "no failed units" 'test "$(systemctl --failed --no-legend | wc -l)" = 0 || { systemctl --failed --no-pager; exit 1; }'
+# Pi OS's swap (zram, backed by a file on a loop device) needs the loop and zram modules, and
+# the test kernel's modules aren't in the image: the Pi kernel's are. On a Pi it starts.
+check "no failed units, but the VM-only swap ones" 'f=$(systemctl --failed --no-legend --plain | awk "{print \$1}" | grep -vE "^(rpi-setup-loop@var-swap\.service|systemd-zram-setup@zram0\.service|dev-zram0\.swap)$" || true); test -z "$f" || { systemctl --failed --no-pager; exit 1; }'
 check "NetworkManager has the interface and kept the address" 'nmcli -t -f DEVICE,TYPE,STATE device | grep -E "^e[a-z0-9]+:ethernet:connected" && ip -4 -br addr | grep 10.0.2'
 check "DNS works" 'getent hosts deb.debian.org'
 check "apt reaches both repositories" 'sudo -n apt-get update 2>&1 | tail -2; apt-cache policy raspi-firmware | grep -q archive.raspberrypi.com'
