@@ -1,0 +1,59 @@
+name: Pi OS golden image
+
+# Builds the Raspberry Pi OS golden image (the official Lite image, made to run from BootBob)
+# natively on an arm64 runner and boots it in a VM over NBD (tools/test-pios-golden.sh). The
+# image has no credentials in it, so it can be an artifact: put your own authorized_keys in
+# its boot partition before uploading it to BootBob (see tools/make-pios-golden.sh).
+#
+# Each build is named for its date, because an overlay is tied to one exact disk. Weekly, so
+# there's always a recent one with this week's updates. Nothing adopts it by itself.
+
+on:
+  push:
+    branches: [master, pios-golden]
+    paths:
+      - tools/make-pios-golden.sh
+      - tools/test-pios-golden.sh
+      - tools/bootbob-nbd-client.hook
+      - tools/machine/**
+      - .github/workflows/pios-golden.yml
+  schedule:
+    - cron: "37 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Name this build
+        run: echo "NAME=raspios-trixie-arm64-$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+      - name: Fetch bootbob-nbd-client from the latest published BootBob
+        run: |
+          # An amd64 image, but the tools are only copied out, never run here.
+          docker pull -q --platform linux/amd64 ghcr.io/cinderblock/bootbob:latest
+          id=$(docker create --platform linux/amd64 ghcr.io/cinderblock/bootbob:latest)
+          docker cp "$id:/usr/share/bootbob/tools" client-tools
+          docker rm "$id"
+      - name: Build
+        run: TOOLS=client-tools TEST_KERNEL=1 sh tools/make-pios-golden.sh "./$NAME.img"
+      - name: Install the test's tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm qemu-utils mtools
+      - name: Boot it in a VM
+        run: sh tools/test-pios-golden.sh "./$NAME.img"
+      - name: Compress
+        run: |
+          sha256sum "$NAME.img" | tee "$NAME.img.sha256" >> "$GITHUB_STEP_SUMMARY"
+          zstd -T0 -6 --sparse "$NAME.img" -o "$NAME.img.zst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            ${{ env.NAME }}.img.zst
+            ${{ env.NAME }}.img.sha256
+          retention-days: 30
+          compression-level: 0
