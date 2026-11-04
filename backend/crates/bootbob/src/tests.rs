@@ -332,10 +332,12 @@ async fn everything_survives_a_restart() {
         .unwrap();
         st.assign(mac, Some(Assignment { image: "r".into(), once: false, set_at: 0, track: None })).unwrap();
         st.put_settings(Settings { poll_secs: 7, ..Settings::default() }).unwrap();
+        st.set_network_zone("America/Los_Angeles".into());
     }
     let st = State::open(config).unwrap();
     assert_eq!(st.device(mac).unwrap().assignment.unwrap().image, "r");
     assert_eq!(st.settings().poll_secs, 7);
+    assert_eq!(st.network_zone().as_deref(), Some("America/Los_Angeles"));
     assert!(st.image("r").is_some_and(|i| !i.builtin));
     assert!(st.image("netboot.xyz").is_some_and(|i| i.builtin));
     assert!(st.events(None, 10).iter().any(|e| e.kind == "assigned"));
@@ -352,6 +354,7 @@ async fn probe_replies_go_to_the_doctor_not_the_device_list() {
     offer.file = b"bootbob".to_vec();
     offer.set_opt(OPT_MESSAGE_TYPE, [2]);
     offer.set_opt(OPT_SERVER_ID, [10, 255, 0, 1]);
+    offer.set_opt(OPT_TZ_NAME, b"America/Los_Angeles".to_vec());
     t.st.observe(Seen::Dhcp {
         src_mac: "f4:e2:c6:00:00:01".parse().unwrap(),
         src_ip: Ipv4Addr::new(10, 255, 0, 1),
@@ -362,6 +365,7 @@ async fn probe_replies_go_to_the_doctor_not_the_device_list() {
     let offers = t.st.take_probe(42);
     assert_eq!(offers.len(), 1);
     assert_eq!(offers[0].boot_file.as_deref(), Some("bootbob"));
+    assert_eq!(offers[0].time_zone.as_deref(), Some("America/Los_Angeles"));
     assert!(t.st.device(mac).is_none());
     assert!(t.st.take_probe(42).is_empty());
 }

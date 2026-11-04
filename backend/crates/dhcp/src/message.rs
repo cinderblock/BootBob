@@ -19,6 +19,7 @@ pub const OPT_USER_CLASS: u8 = 77;
 pub const OPT_ARCH: u8 = 93;
 pub const OPT_NDI: u8 = 94;
 pub const OPT_UUID: u8 = 97;
+pub const OPT_TZ_NAME: u8 = 101;
 pub const OPT_OVERLOAD: u8 = 52;
 pub const OPT_END: u8 = 255;
 
@@ -288,6 +289,11 @@ impl Message {
             return Some(s);
         }
         (!self.file.is_empty()).then(|| String::from_utf8_lossy(&self.file).into_owned())
+    }
+
+    /// The tz database name a reply gives (option 101).
+    pub fn time_zone(&self) -> Option<String> {
+        self.text(OPT_TZ_NAME).filter(|s| !s.is_empty())
     }
 
     pub fn broadcast(&self) -> bool {

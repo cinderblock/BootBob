@@ -1058,13 +1058,25 @@ async fn store_disk(
     res.map(IntoResponse::into_response).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
-async fn get_settings(Ax(st): Ax<St>) -> Json<Settings> {
-    Json(st.settings())
+/// The settings, plus what the network says, which isn't a setting. A `PUT` of this ignores it.
+#[derive(Serialize)]
+struct SettingsView {
+    #[serde(flatten)]
+    settings: Settings,
+    network_time_zone: Option<String>,
 }
 
-async fn put_settings(Ax(st): Ax<St>, Json(s): Json<Settings>) -> Result<Json<Settings>, ApiError> {
-    st.put_settings(s.clone()).map_err(bad)?;
-    Ok(Json(s))
+fn settings_view(st: &State) -> SettingsView {
+    SettingsView { settings: st.settings(), network_time_zone: st.network_zone() }
+}
+
+async fn get_settings(Ax(st): Ax<St>) -> Json<SettingsView> {
+    Json(settings_view(&st))
+}
+
+async fn put_settings(Ax(st): Ax<St>, Json(s): Json<Settings>) -> Result<Json<SettingsView>, ApiError> {
+    st.put_settings(s).map_err(bad)?;
+    Ok(Json(settings_view(&st)))
 }
 
 #[derive(Deserialize)]

@@ -305,7 +305,8 @@ pub struct Settings {
     /// How long a machine has, from the start of its boot, to say it's healthy on a new
     /// version. Past that the rollout halts. Longer than the machine's slowest healthy boot.
     pub rollout_health_minutes: u32,
-    /// An IANA name, such as `America/Los_Angeles`.
+    /// An IANA name, such as `America/Los_Angeles`. Empty: whatever the network gives over
+    /// DHCP (option 101), else UTC.
     pub time_zone: String,
     pub theme: Theme,
 }
@@ -320,7 +321,7 @@ impl Default for Settings {
             rollout_start: "05:00".into(),
             rollout_minutes: 60,
             rollout_health_minutes: 15,
-            time_zone: "UTC".into(),
+            time_zone: String::new(),
             theme: Theme::default(),
         }
     }

@@ -116,7 +116,21 @@ export function SettingsView({ live }: { live: Live }) {
           minutes to come back healthy
         </label>
         <label>
-          In the time zone <input value={s.time_zone} onInput={(e) => setS({ ...s, time_zone: e.currentTarget.value })} />{" "}
+          In the time zone{" "}
+          <input
+            value={s.time_zone}
+            placeholder={s.network_time_zone ?? "UTC"}
+            onInput={(e) => setS({ ...s, time_zone: e.currentTarget.value })}
+          />{" "}
+          {s.time_zone === "" ? (
+            <span className="muted">{s.network_time_zone ? "from the network" : "the network gives none"}</span>
+          ) : (
+            s.network_time_zone && (
+              <button type="button" className="secondary" onClick={() => setS({ ...s, time_zone: "" })}>
+                Use the network's
+              </button>
+            )
+          )}{" "}
           {s.time_zone !== browserZone && (
             <button type="button" className="secondary" onClick={() => setS({ ...s, time_zone: browserZone })}>
               Use {browserZone}

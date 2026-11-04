@@ -64,7 +64,9 @@ fn parse_time(s: &str) -> Option<Time> {
 /// Whether `s`'s window settings make sense.
 pub fn check_window(s: &Settings) -> Result<(), String> {
     parse_time(&s.rollout_start).ok_or_else(|| format!("rollout_start must be HH:MM, not {:?}", s.rollout_start))?;
-    TimeZone::get(&s.time_zone).map_err(|_| format!("no time zone {:?}", s.time_zone))?;
+    if !s.time_zone.is_empty() {
+        TimeZone::get(&s.time_zone).map_err(|_| format!("no time zone {:?}", s.time_zone))?;
+    }
     if !(1..=1440).contains(&s.rollout_minutes) {
         return Err("rollout_minutes must be 1–1440".into());
     }
@@ -100,7 +102,7 @@ pub fn next_window(s: &Settings, at: Millis) -> Option<Millis> {
 }
 
 fn is_open(st: &State, t: &Track, now: Millis) -> bool {
-    t.open_until.is_some_and(|u| now < u) || in_window(&st.settings(), now)
+    t.open_until.is_some_and(|u| now < u) || in_window(&st.window_settings(), now)
 }
 
 // ---- What a machine hears ----
@@ -312,7 +314,7 @@ pub struct TrackView {
 
 pub fn view(st: &State, track: Track) -> TrackView {
     let now = now_ms();
-    TrackView { open: is_open(st, &track, now), next_window: next_window(&st.settings(), now), track }
+    TrackView { open: is_open(st, &track, now), next_window: next_window(&st.window_settings(), now), track }
 }
 
 /// Adds a version: a copy of the current one over a new disk, which becomes current. The next

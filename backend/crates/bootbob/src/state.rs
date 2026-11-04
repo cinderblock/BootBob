@@ -60,6 +60,9 @@ pub struct State {
     devices: RwLock<BTreeMap<Mac, Device>>,
     images: RwLock<BTreeMap<String, Image>>,
     settings: RwLock<Settings>,
+    /// The time zone the network last gave over DHCP. Kept across restarts, and through a
+    /// quiet DHCP server, so the rollout window doesn't jump to UTC.
+    network_zone: RwLock<Option<String>>,
     events: Mutex<VecDeque<Event>>,
     /// IP → MAC, learnt from DHCP replies and TFTP request frames.
     addresses: Mutex<HashMap<Ipv4Addr, (Mac, Millis)>>,
@@ -90,6 +93,7 @@ impl State {
             images.insert(b.id.clone(), b);
         }
         let settings = store.get::<Settings>(Table::Meta, "settings")?.unwrap_or_default();
+        let network_zone = store.get::<String>(Table::Meta, "network_time_zone")?;
         let catalogue = store.all::<crate::catalogue::Entry>(Table::Catalogue)?.into_iter().map(|e| (e.id.clone(), e)).collect();
         let tracks = store.all::<Track>(Table::Tracks)?.into_iter().map(|t| (t.id.clone(), t)).collect();
         let events = store.recent_events::<Event>(EVENTS_IN_MEMORY)?.into();
@@ -101,6 +105,7 @@ impl State {
             devices: RwLock::new(devices),
             images: RwLock::new(images),
             settings: RwLock::new(settings),
+            network_zone: RwLock::new(network_zone),
             events: Mutex::new(events),
             addresses: Mutex::new(HashMap::new()),
             probes: Mutex::new(HashMap::new()),
@@ -478,6 +483,31 @@ impl State {
         self.settings.read().unwrap().clone()
     }
 
+    pub fn network_zone(&self) -> Option<String> {
+        self.network_zone.read().unwrap().clone()
+    }
+
+    pub fn set_network_zone(&self, zone: String) {
+        if self.network_zone().as_ref() == Some(&zone) {
+            return;
+        }
+        if let Err(e) = self.store.put(Table::Meta, "network_time_zone", &zone) {
+            tracing::warn!("can't save the network's time zone: {e}");
+        }
+        self.event(None, "time-zone", format!("The network's time zone is {zone}"));
+        *self.network_zone.write().unwrap() = Some(zone);
+        self.notify(Change::Settings);
+    }
+
+    /// The settings with the time zone actually in force filled in.
+    pub fn window_settings(&self) -> Settings {
+        let mut s = self.settings();
+        if s.time_zone.is_empty() {
+            s.time_zone = self.network_zone().unwrap_or_else(|| "UTC".into());
+        }
+        s
+    }
+
     pub fn put_settings(&self, s: Settings) -> Result<(), String> {
         s.theme.validate()?;
         match self.image(&s.default_image) {
@@ -667,6 +697,7 @@ impl State {
                         src_mac,
                         boot_server: msg.boot_server(),
                         boot_file: msg.boot_file(),
+                        time_zone: msg.time_zone(),
                     });
                     return;
                 }
