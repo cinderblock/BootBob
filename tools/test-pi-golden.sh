@@ -90,6 +90,7 @@ check "the key went to pi, not root" 'test -s /home/pi/.ssh/authorized_keys && t
 check "the base packages are there" 'for p in wpasupplicant rsync curl git htop btop python3-venv build-essential avahi-daemon; do dpkg-query -W -f "\${db:Status-Status} \${Package}\n" "$p" | grep "^installed " || { echo "missing $p"; exit 1; }; done'
 check "no cron: systemd timers do its job" 'dpkg-query -W -f "\${db:Status-Status} \${Package}\n" cron cron-daemon-common 2>/dev/null; ! dpkg-query -W -f "\${db:Status-Status}\n" cron cron-daemon-common 2>/dev/null | grep -qx installed && ! command -v cron && test ! -e /etc/crontab && echo none'
 check "avahi is running" 'systemctl is-active avahi-daemon'
+check "and .local names go to it" 'dpkg-query -W -f "\${db:Status-Status}\n" libnss-mdns | grep -x installed && grep -E "^hosts:.* mdns4_minimal" /etc/nsswitch.conf'
 check "root is the NBD disk, read-write" 'findmnt -no SOURCE,OPTIONS / | grep -E "^/dev/nbd0p2 +rw"'
 check "boot partition is mounted" 'findmnt -no SOURCE /boot/firmware | grep -x /dev/nbd0p1'
 check "the resident client is running" 'ps -eo args | grep "^@" | grep -i nbd'

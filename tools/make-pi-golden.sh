@@ -32,7 +32,8 @@
 # initramfs set up: the root filesystem is behind it. No desktop. The user is pi: SSH keys
 # only (no password), sudo without one; the first boot installs
 # /boot/firmware/authorized_keys for pi. Also wpasupplicant, rsync, curl, git, htop, btop,
-# python3-venv, build-essential and avahi-daemon. No cron: systemd timers do its job.
+# python3-venv, build-essential, and avahi-daemon with libnss-mdns for .local names.
+# No cron: systemd timers do its job.
 
 set -eu
 OUT=${1:?usage: make-pi-golden.sh <out.img> [size-GiB] [authorized_keys-file]}
@@ -92,7 +93,7 @@ gpg --show-keys --with-colons "$PIKEY" | grep -q "^fpr:*CF8A1AF502A2AA2D763BAE7E
 
 mmdebstrap --architectures=arm64 --variant=important \
   --setup-hook="mkdir -p \"\$1\$(dirname $PIKEY)\" && cp $PIKEY \"\$1$PIKEY\"" \
-  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,firmware-brcm80211,bluez-firmware,initramfs-tools,zstd,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates,curl,sudo,libnss-myhostname,wpasupplicant,rsync,git,htop,btop,python3-venv,build-essential,avahi-daemon \
+  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,firmware-brcm80211,bluez-firmware,initramfs-tools,zstd,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates,curl,sudo,libnss-myhostname,wpasupplicant,rsync,git,htop,btop,python3-venv,build-essential,avahi-daemon,libnss-mdns \
   trixie "$ROOT" \
   "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware" \
   "deb http://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware" \
