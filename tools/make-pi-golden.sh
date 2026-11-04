@@ -114,6 +114,10 @@ Name=e*
 DHCP=yes
 KeepConfiguration=yes
 EOF
+# ip=dhcp on the command line makes systemd-network-generator write 71-default.network, which
+# matches every link, Wi-Fi too. The wlan0 of a Pi never gets a carrier, so wait-online fails and
+# the machine reports "degraded": a rollout would halt on every new version. Wired only.
+ln -sf /dev/null "$ROOT/etc/systemd/network/71-default.network"
 ln -sf ../run/systemd/resolve/stub-resolv.conf "$ROOT/etc/resolv.conf"
 
 cat > "$ROOT/usr/sbin/bootbob-first-boot" <<EOF

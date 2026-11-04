@@ -75,6 +75,7 @@ check "first boot made SSH host keys" 'test -s /etc/ssh/ssh_host_ed25519_key.pub
 check "machine-id exists" 'test -s /etc/machine-id && cat /etc/machine-id'
 check "no failed units" 'test "$(systemctl --failed --no-legend | wc -l)" = 0 || { systemctl --failed --no-pager; exit 1; }'
 check "networkd manages the interface and kept the address" 'networkctl --no-pager | grep -E "e[a-z0-9]+ +ether +routable +configured" && ip -4 -br addr | grep 10.0.2'
+check "the command line's catch-all network file is masked, so Wi-Fi can't hold up boot" 'test "$(readlink /etc/systemd/network/71-default.network)" = /dev/null'
 check "DNS works" 'getent hosts deb.debian.org'
 check "apt reaches both repositories" 'apt-get update 2>&1 | tail -2; apt-cache policy raspi-firmware | grep -q archive.raspberrypi.com'
 check "EEPROM updates are on, for boards that have an EEPROM" 'test "$(systemctl is-enabled rpi-eeprom-update)" = enabled'
