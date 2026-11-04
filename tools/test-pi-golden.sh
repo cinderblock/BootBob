@@ -88,7 +88,7 @@ check_pi "a machine resolves its own name, so sudo does not complain" 'getent ho
 check_pi "python3 makes a venv, and the compiler builds" 'python3 -m venv /tmp/v && /tmp/v/bin/python -c "print(1)" && printf "int main(void) { return 0; }\n" > /tmp/t.c && cc -o /tmp/t /tmp/t.c && /tmp/t && echo built'
 check "the key went to pi, not root" 'test -s /home/pi/.ssh/authorized_keys && test ! -e /root/.ssh/authorized_keys && stat -c "%U %a" /home/pi/.ssh/authorized_keys'
 check "the base packages are there" 'for p in wpasupplicant rsync curl git htop btop python3-venv build-essential avahi-daemon; do dpkg-query -W -f "\${db:Status-Status} \${Package}\n" "$p" | grep "^installed " || { echo "missing $p"; exit 1; }; done'
-check "no cron: systemd timers do its job" '! dpkg-query -W -f "\${db:Status-Status}\n" cron cron-daemon-common 2>/dev/null | grep -q installed && ! command -v cron && test ! -e /etc/crontab && echo none'
+check "no cron: systemd timers do its job" 'dpkg-query -W -f "\${db:Status-Status} \${Package}\n" cron cron-daemon-common 2>/dev/null; ! dpkg-query -W -f "\${db:Status-Status}\n" cron cron-daemon-common 2>/dev/null | grep -qx installed && ! command -v cron && test ! -e /etc/crontab && echo none'
 check "avahi is running" 'systemctl is-active avahi-daemon'
 check "root is the NBD disk, read-write" 'findmnt -no SOURCE,OPTIONS / | grep -E "^/dev/nbd0p2 +rw"'
 check "boot partition is mounted" 'findmnt -no SOURCE /boot/firmware | grep -x /dev/nbd0p1'
