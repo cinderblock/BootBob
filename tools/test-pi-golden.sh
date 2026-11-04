@@ -2,8 +2,9 @@
 # Boot a make-pi-golden.sh image in an arm64 VM, over NBD, and check it from the inside.
 # The Pi kernels and firmware can't run in QEMU's virt machine, so this uses the generic
 # kernel TEST_KERNEL=1 builds; everything else is the real image: the initramfs's NBD
-# root with bootbob-nbd-client, first boot, networking, and the root surviving the NBD
-# server restarting. Only real Pi hardware proves the firmware's network boot.
+# root with bootbob-nbd-client, first boot, the pi user and the base packages, networking,
+# and the root surviving the NBD server restarting. Only real Pi hardware proves the
+# firmware's network boot.
 #
 #   tools/test-pi-golden.sh <out.img>
 #
@@ -48,13 +49,19 @@ qemu-system-aarch64 -M virt -accel "$ACCEL" -cpu max -smp 4 -m 2048 -nographic -
   </dev/null >"$WORK/serial.log" 2>&1 &
 VM_PID=$!
 
-vm() {
+# The key logs in pi, the only user it was given to. as_pi runs a command as pi; vm runs it
+# as root, through sudo without a password, as everything that needs root does.
+as_pi() {
   ssh -q -i "$WORK/key" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ConnectTimeout=10 -o BatchMode=yes root@127.0.0.1 "$@"
+    -o ConnectTimeout=10 -o BatchMode=yes pi@127.0.0.1 "$@"
+}
+vm() {
+  # The command travels as base64, so no quoting of it can go wrong on the way.
+  as_pi "sudo -n sh -c \"\$(echo $(printf %s "$*" | base64 | tr -d '\n') | base64 -d)\""
 }
 
 i=0
-until vm true 2>/dev/null; do
+until as_pi true 2>/dev/null; do
   kill -0 "$VM_PID" 2>/dev/null || fail "the VM stopped"
   i=$((i + 1))
   [ "$i" -lt 90 ] || fail "no SSH after 15 minutes"
@@ -68,6 +75,21 @@ check() {
   vm "$@" >"$WORK/out" 2>&1 || { cat "$WORK/out" >&2; fail "$what"; }
   echo "ok: $what: $(tr '\n' ' ' <"$WORK/out")"
 }
+check_pi() {
+  what=$1
+  shift
+  as_pi "$@" >"$WORK/out" 2>&1 || { cat "$WORK/out" >&2; fail "$what"; }
+  echo "ok: $what: $(tr '\n' ' ' <"$WORK/out")"
+}
+vm 'systemctl is-system-running --wait >/dev/null 2>&1' || true
+check_pi "pi is the login user, with bash, no password, and sudo needing none" 'test "$(id -un)" = pi && test "$(getent passwd pi | cut -d: -f7)" = /bin/bash && sudo -n passwd -S pi | grep -E "^pi L" && sudo -n true && echo yes'
+check_pi "pi has its groups" 'id -nG | tr " " "\n" | grep -cxE "adm|dialout|sudo|video|plugdev|input" | grep -x 6'
+check_pi "a machine resolves its own name, so sudo does not complain" 'getent hosts "$(hostname)" && ! sudo -n true 2>&1 | grep -q "unable to resolve"'
+check_pi "python3 makes a venv, and the compiler builds" 'python3 -m venv /tmp/v && /tmp/v/bin/python -c "print(1)" && printf "int main(void) { return 0; }\n" > /tmp/t.c && cc -o /tmp/t /tmp/t.c && /tmp/t && echo built'
+check "the key went to pi, not root" 'test -s /home/pi/.ssh/authorized_keys && test ! -e /root/.ssh/authorized_keys && stat -c "%U %a" /home/pi/.ssh/authorized_keys'
+check "the base packages are there" 'for p in wpasupplicant rsync curl git htop btop python3-venv build-essential avahi-daemon; do dpkg-query -W -f "\${db:Status-Status} \${Package}\n" "$p" | grep "^installed " || { echo "missing $p"; exit 1; }; done'
+check "no cron: systemd timers do its job" '! dpkg-query -W -f "\${db:Status-Status}\n" cron cron-daemon-common 2>/dev/null | grep -q installed && ! command -v cron && test ! -e /etc/crontab && echo none'
+check "avahi is running" 'systemctl is-active avahi-daemon'
 check "root is the NBD disk, read-write" 'findmnt -no SOURCE,OPTIONS / | grep -E "^/dev/nbd0p2 +rw"'
 check "boot partition is mounted" 'findmnt -no SOURCE /boot/firmware | grep -x /dev/nbd0p1'
 check "the resident client is running" 'ps -eo args | grep "^@" | grep -i nbd'

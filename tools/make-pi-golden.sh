@@ -23,13 +23,16 @@
 # an overlay is tied to one exact disk: a new build is a new file, for rollouts (see the
 # README). bootbob.url is how the bootbob-rollout timer finds BootBob.
 # No SSH keys built in? Put one in the boot partition before uploading, and the first
-# boot installs it for root: `mcopy -i out.img@@8M authorized_keys ::authorized_keys`.
+# boot installs it for pi: `mcopy -i out.img@@8M authorized_keys ::authorized_keys`.
 #
 # The image: Debian trixie arm64 and Raspberry Pi's repository (its kernels and firmware,
 # updated by apt like any Pi OS: the boot partition is mounted at /boot/firmware, and
 # TFTP reads boot files through the machine's overlay, so a machine's kernel update
 # reaches its own next boot). Network by systemd-networkd, which keeps the address the
-# initramfs set up: the root filesystem is behind it. No desktop, no default user.
+# initramfs set up: the root filesystem is behind it. No desktop. The user is pi: SSH keys
+# only (no password), sudo without one; the first boot installs
+# /boot/firmware/authorized_keys for pi. Also wpasupplicant, rsync, curl, git, htop, btop,
+# python3-venv, build-essential and avahi-daemon. No cron: systemd timers do its job.
 
 set -eu
 OUT=${1:?usage: make-pi-golden.sh <out.img> [size-GiB] [authorized_keys-file]}
@@ -89,11 +92,29 @@ gpg --show-keys --with-colons "$PIKEY" | grep -q "^fpr:*CF8A1AF502A2AA2D763BAE7E
 
 mmdebstrap --architectures=arm64 --variant=important \
   --setup-hook="mkdir -p \"\$1\$(dirname $PIKEY)\" && cp $PIKEY \"\$1$PIKEY\"" \
-  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,firmware-brcm80211,bluez-firmware,initramfs-tools,zstd,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates,curl \
+  --include=linux-image-rpi-v8,linux-image-rpi-2712,raspi-firmware,raspberrypi-archive-keyring,rpi-eeprom,firmware-brcm80211,bluez-firmware,initramfs-tools,zstd,nbd-client,openssh-server,systemd-sysv,systemd-resolved,systemd-timesyncd,udev,dbus,iproute2,ca-certificates,curl,sudo,libnss-myhostname,wpasupplicant,rsync,git,htop,btop,python3-venv,build-essential,avahi-daemon \
   trixie "$ROOT" \
   "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware" \
   "deb http://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware" \
   "deb [signed-by=$PIKEY] $PIREPO trixie main"
+
+# cron is Priority: important, so the variant brings it. Only cron itself may go: anything
+# else apt would take with it fails the build.
+mount -t proc proc "$ROOT/proc"
+chroot "$ROOT" apt-get purge -s --autoremove cron cron-daemon-common | sed -n "s/^Purg \([^ ]*\).*/\1/p" | sort > /work/purge
+printf "cron\ncron-daemon-common\n" | sort | cmp -s - /work/purge || {
+  echo "removing cron would also remove:" >&2; cat /work/purge >&2; exit 1
+}
+DEBIAN_FRONTEND=noninteractive chroot "$ROOT" apt-get purge -y -qq --autoremove cron cron-daemon-common >/dev/null
+chroot "$ROOT" apt-get clean
+umount "$ROOT/proc"
+
+# pi, with the groups Debian has of the ones Pi OS gives it. No password: keys only.
+chroot "$ROOT" useradd -m -s /bin/bash -G adm,dialout,cdrom,sudo,audio,video,plugdev,users,input,render pi
+chroot "$ROOT" passwd -l pi >/dev/null
+printf "pi ALL=(ALL) NOPASSWD: ALL\n" > "$ROOT/etc/sudoers.d/010_pi-nopasswd"
+chmod 0440 "$ROOT/etc/sudoers.d/010_pi-nopasswd"
+chroot "$ROOT" visudo -cq
 
 # Each machine makes its own on first boot. No /etc/hostname: DHCP names the machine.
 rm -f "$ROOT"/etc/ssh/ssh_host_* "$ROOT/etc/hostname" "$ROOT/var/lib/dbus/machine-id"
@@ -122,8 +143,8 @@ cat > "$ROOT/usr/sbin/bootbob-first-boot" <<EOF
 set -eu
 ssh-keygen -A
 if [ -f /boot/firmware/authorized_keys ]; then
-  install -d -m 0700 /root/.ssh
-  install -m 0600 /boot/firmware/authorized_keys /root/.ssh/authorized_keys
+  install -d -m 0700 -o pi -g pi /home/pi/.ssh
+  install -m 0600 -o pi -g pi /boot/firmware/authorized_keys /home/pi/.ssh/authorized_keys
 fi
 EOF
 chmod 755 "$ROOT/usr/sbin/bootbob-first-boot"
@@ -131,7 +152,7 @@ cat > "$ROOT/etc/systemd/system/bootbob-first-boot.service" <<EOF
 [Unit]
 Description=First boot of a BootBob golden image
 ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
-RequiresMountsFor=/boot/firmware
+RequiresMountsFor=/boot/firmware /home
 Before=ssh.service
 
 [Service]
