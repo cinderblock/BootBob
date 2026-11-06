@@ -22,6 +22,8 @@
 # The image: Debian trixie amd64, linux-image-amd64, nbd-client (its initramfs hook
 # brings NBD root support), openssh-server with the given authorized_keys for root,
 # hostname bootbob-pc. The machine's hostname comes from DHCP if the network gives one.
+# Also wpasupplicant, rsync, curl, git, htop, btop, python3-venv, build-essential, and
+# avahi-daemon with libnss-mdns for .local names. No cron: systemd timers do its job.
 
 set -eu
 OUT=${1:?usage: make-pc-golden.sh <out.img> [size-GiB] [authorized_keys-file]}
@@ -54,8 +56,19 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mmdebstrap dosfstools e2fs
 
 ROOT=/work/root
 mkdir -p /work
-mmdebstrap --variant=important --include=linux-image-amd64,initramfs-tools,nbd-client,openssh-server,systemd-sysv,dbus,libpam-systemd,udev,iproute2,ca-certificates,curl \
+mmdebstrap --variant=important --include=linux-image-amd64,initramfs-tools,nbd-client,openssh-server,systemd-sysv,dbus,libpam-systemd,udev,iproute2,ca-certificates,curl,wpasupplicant,rsync,git,htop,btop,python3-venv,build-essential,avahi-daemon,libnss-mdns \
   trixie "$ROOT" http://deb.debian.org/debian
+
+# cron is Priority: important, so the variant brings it. Only cron itself may go: anything
+# else apt would take with it fails the build.
+mount -t proc proc "$ROOT/proc"
+chroot "$ROOT" apt-get purge -s --autoremove cron cron-daemon-common | sed -n "s/^Purg \([^ ]*\).*/\1/p" | sort > /work/purge
+printf "cron\ncron-daemon-common\n" | sort | cmp -s - /work/purge || {
+  echo "removing cron would also remove:" >&2; cat /work/purge >&2; exit 1
+}
+DEBIAN_FRONTEND=noninteractive chroot "$ROOT" apt-get purge -y -qq --autoremove cron cron-daemon-common >/dev/null
+chroot "$ROOT" apt-get clean
+umount "$ROOT/proc"
 
 echo bootbob-pc > "$ROOT/etc/hostname"
 printf "127.0.1.1\tbootbob-pc\n" >> "$ROOT/etc/hosts"

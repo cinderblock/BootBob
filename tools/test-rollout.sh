@@ -189,6 +189,10 @@ settled "${macs[0]}" fleet-1 "machine 0 didn't come up healthy"
 settled "${macs[1]}" fleet-1 "machine 1 didn't come up healthy"
 vm "${macs[0]}" 'echo mine >/root/state && sync'
 ok "both up on version 1, reporting running; machine 0 wrote a file"
+vm "${macs[0]}" 'for p in wpasupplicant rsync curl git htop btop python3-venv build-essential avahi-daemon libnss-mdns; do dpkg-query -W -f "\${db:Status-Status}\n" "$p" | grep -qx installed || { echo "missing $p"; exit 1; }; done' || die "the base packages aren't all there"
+vm "${macs[0]}" '! dpkg-query -W -f "\${db:Status-Status}\n" cron cron-daemon-common 2>/dev/null | grep -qx installed && ! command -v cron' || die "cron is there"
+vm "${macs[0]}" 'systemctl is-active avahi-daemon && grep -qE "^hosts:.* mdns4_minimal" /etc/nsswitch.conf' >/dev/null || die "avahi isn't running, or .local names don't go to it"
+ok "the base packages are there, cron isn't, and avahi runs"
 
 overlay=$work/data/overlays/$(echo "${macs[0]}" | tr : -)
 
