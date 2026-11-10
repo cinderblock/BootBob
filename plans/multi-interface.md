@@ -38,90 +38,91 @@ MAC (ISSUES.md, "Anything on the LAN can drive BootBob…", `0abf3df`).
   - The time zone (DHCP option 101) is learnt from any DHCP reply the listener sees.
   - mDNS advertises only on `interface`.
 
-## Proposed design (awaiting Cameron)
+## Proposed design (revised 2026-11-10 after Cameron's answers)
 
-### 1. Config
+### 1. Config: boot interfaces and the control plane are separate
 
-Keep today's file working unchanged: no `[[interfaces]]` means one implicit interface
-built from `interface`, `http`, `tftp`, `nbd`, `public_url`, trusted, serving everything,
-exactly as now.
-
-New form:
+Two unrelated sets of settings (Cameron: "keep interfaces for boot separate from
+interfaces for UI control. they are entirely different sets of configs"):
 
 ```toml
-[[interfaces]]
-name = "eno1"                 # the kernel device; address discovered (or `address = …`)
-label = "TSL LAN"             # optional; VLAN id is discovered
-trust = "full"                # API + web UI here; any machine seen here may boot
-                              # (today's behaviour)
+# Control plane: the web UI and management API. Boots nothing.
+[control]
+http = ["10.255.0.5:8067"]    # where the UI/API listen
+mdns = ["eno1"]               # where BootBob advertises itself
 
-[[interfaces]]
-name = "eno1.5"
+# Boot interfaces: where machines netboot. No UI, no management API.
+[[boot]]
+interface = "eno1"            # kernel device; address and VLAN discovered
+label = "TSL LAN"
+services = ["dhcp-listen", "tftp", "http", "nbd"]
+
+[[boot]]
+interface = "eno1.5"
 label = "Hardware CI"
-trust = "boot"                # no API/UI/mDNS; only machines admitted to this interface
-serve = ["tftp", "nbd", "http-boot"]   # default: everything trust allows
-images = ["ci-pi"]            # optional allowlist of images it may serve
-url = "http://10.5.0.5:8067"  # optional per-interface public_url
+services = ["tftp", "http", "nbd"]
+url = "http://10.5.0.5:8067"  # optional: what machines here are told to fetch from
 ```
 
-Ports stay global (`http`, `tftp`, `nbd` keep their meaning; with `[[interfaces]]` only
-their port is used, and an IP other than unspecified is an error so it's never ambiguous).
+Today's file (no `[control]`/`[[boot]]`) keeps working: it becomes one control listener
+and one boot interface on the same address, as now.
+
+Open (question 5): a boot interface and the control listener on the same address and
+port. Proposed: allowed, served by one socket with both route sets, so every existing
+machine, USB stick and `bootbob.url=` keeps working. A boot interface with no control
+listener on it gets only the boot routes (`/boot/*`, `/files/*`).
 
 ### 2. Binding (weak-host model)
 
-One socket per interface per service, each bound to the interface's address **and**
-`SO_BINDTODEVICE` to the device. A packet for eno1.5's address that arrives on eno1 then
-finds no socket, and vice versa, so the ingress interface is enforced by the kernel, not
-by an address check in our code. TFTP per-transfer sockets get the same binding. NET_RAW
-(already granted) covers `SO_BINDTODEVICE` on older kernels.
-
-Each listener tags requests with its interface, so every resolver (TFTP, NBD, HTTP)
-knows where a request came in. HTTP runs one axum server per interface: the full router
-on `trust = "full"`, the boot-only router (`/boot/*`, `/files/ipxe|tools|cache`) on
-`trust = "boot"`.
+One socket per boot interface per service, bound to the interface's address **and**
+`SO_BINDTODEVICE`, so the kernel drops anything that arrives on the wrong interface. TFTP
+per-transfer sockets get the same binding. Each request carries its boot interface into
+the resolvers.
 
 ### 3. Identity per interface
 
-- One DHCP listener per interface with listening on, each tagging what it sees.
-- `addresses` keyed by `(interface, ip)`; neighbour fallback filtered on the
-  `/proc/net/arp` device column. A request on eno1.5 is only ever matched against
-  eno1.5's table.
-- On a `boot` interface, HTTP boot requests take the MAC from the neighbour table, not
-  from `mac=` (or require `mac=` to match it).
-- Learning the network time zone only from `full` interfaces, so a forged DHCP reply on
-  the CI VLAN can't move the rollout window.
+- One DHCP listener per boot interface with `dhcp-listen`, tagging what it sees.
+- `addresses` keyed by `(interface, ip)`; neighbour fallback filtered on the device.
+- HTTP boot requests take the MAC from the neighbour table on that interface; a `mac=`
+  that disagrees is refused and logged.
+- The network time zone is learnt only from the listener on the control interface (or a
+  configured one), never a CI VLAN.
 
-### 4. Admission (which machines an interface serves)
+### 4. Admission: unknown machines are held at the menu
 
-Each device records where it was seen: `seen_on = { interface, vlan, at }`.
-- `trust = "full"`: any machine (today's behaviour). Machines seen here are recorded.
-- `trust = "boot"`: only machines admitted to that interface (`device.interfaces`
-  contains it). A new MAC there shows in the UI as "seen on Hardware CI (VLAN 5), not
-  admitted" and gets nothing until someone admits it from a `full` interface's UI.
-  A MAC admitted only to eno1 (desky) that shows up on eno1.5 is refused and logged.
-- Optional `images` allowlist per interface: resolution never hands out anything else
-  there (falls through to "nothing to boot").
+Cameron: an unadmitted machine "should be held at our boot menu until a local user or
+remote admin tells it what to do", and "unauthorized hosts only get access to public
+images".
 
-Honest limit: MAC and IP are spoofable *within* one L2 segment. Scoping contains that to
-the segment: the CI Pi can only ever be the CI Pi.
+- Images get a `public` flag. The built-in menu and local-disk boot are public.
+- An **unadmitted** machine gets the fallback menu, listing only public images. Someone
+  at its keyboard can pick one (for that boot). An admin can admit it and/or assign it
+  something from the UI.
+- An **admitted** machine is admitted to particular boot interfaces. A machine admitted
+  only to eno1 (desky) that turns up on eno1.5 is treated as unadmitted there: menu,
+  public images only, logged.
+- NBD and Pi TFTP serve an unadmitted machine only the disks of public images.
+- Open: Pis have no menu (question 6), whether admission applies on eno1 too
+  (question 7).
+
+Honest limit: MAC and IP are spoofable within one L2 segment. Scoping keeps that inside
+the segment.
 
 ### 5. VLAN discovery and UI
 
-- Read `/proc/net/vlan/config` (`eno1.5 | 5 | eno1`), refreshed periodically; interfaces'
-  IPv4 address/prefix via `getifaddrs`. Not netlink for now (no new dependency; can move
-  later). VLANs on a VLAN-filtering bridge don't show there: shown as "no VLAN".
-- `/api/status` lists interfaces: name, label, VLAN, parent, address, trust, services,
-  listener counters.
-- Devices page: group by interface/VLAN ("VLAN 5: Hardware CI", "Untagged: TSL LAN"), with
-  each device's VLAN shown on its row.
+- `/proc/net/vlan/config` for VLAN id and parent; `getifaddrs` for addresses. VLANs on a
+  VLAN-filtering bridge don't show there: shown as "no VLAN".
+- `/api/status` lists boot interfaces (name, label, VLAN, parent, address, services,
+  listener counters) and the control listeners.
+- Devices page grouped by VLAN ("VLAN 5: Hardware CI"), with admit/unadmit per interface.
 
 ### 6. Out of scope / follow-ups
 
 - Image stores on a VLAN: a CI Pi using an `uberfall:` disk would connect to uberfall's
-  NBD directly, which isn't on VLAN 5, and the main server can't identify it there. For
-  now CI disks live on steamboat. (Question 3 below.)
-- Read-only exports (ISSUES.md, `bc912f6`): separate, but the CI Pi wants it.
-- Authentication on the API: still none; `full` interfaces are the trusted LAN.
+  NBD directly, which isn't on VLAN 5. For now VLAN-served disks live on steamboat.
+- Read-only exports (ISSUES.md, `bc912f6`).
+- Authentication on the control API: still none; it's reachable only where `[control]`
+  listens.
 
 ## Decisions already made (don't re-ask)
 
@@ -129,6 +130,10 @@ the segment: the CI Pi can only ever be the CI Pi.
 - The single-interface config keeps working (brief).
 - Ops changes (`bootbob.toml`, netplan VLAN, UniFi) are staged in the ops repo for a
   per-change yes, never applied by this thread.
+- Boot interfaces and the control plane (UI/API) are entirely separate config sets
+  (Cameron, 2026-11-10).
+- Unadmitted machines are held at BootBob's boot menu until a local user or remote admin
+  says what to do; they get only public images (Cameron, 2026-11-10).
 
 ## Plan / steps
 
@@ -161,12 +166,20 @@ the segment: the CI Pi can only ever be the CI Pi.
 
 ## Open questions for Cameron
 
-1. Admission on the CI VLAN: explicit admit per machine (recommended), or any machine
-   seen there?
-2. API/UI only on `trust = "full"` interfaces, and MAC from the neighbour table on `boot`
-   interfaces (recommended)?
-3. Stores: OK that VLAN-served disks must live on steamboat for now?
-4. Config shape: `trust` presets plus optional `serve` override, as above?
+1. ~~Admission policy~~: answered, held at the menu, public images only.
+2. ~~API/UI on restricted interfaces~~: answered, separate config sets.
+3. Stores: OK that VLAN-served disks must live on steamboat for now? (Recommend yes.)
+4. ~~Config shape~~: superseded by `[control]` + `[[boot]]`.
+5. Control and a boot interface sharing one address:port, served by one socket with both
+   route sets? (Recommend yes, for compatibility.)
+6. Pis can't show a menu. An unadmitted Pi: gets nothing and shows as waiting until an
+   admin acts (recommended), or boots a public Pi default if one is set?
+7. Does "unadmitted = held at the menu" apply on eno1 too (today unknown machines there get
+   the site default), or is it a per-boot-interface setting? (Recommend per interface,
+   eno1 keeping today's behaviour until you flip it.)
+8. Does an admin assigning an image to an unadmitted machine also admit it (one click), or
+   are admit and assign separate? (Recommend: assigning admits it to the interface it was
+   last seen on.)
 
 ## Things not to do
 
