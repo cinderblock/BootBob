@@ -53,3 +53,15 @@ A machine moving to a new version comes up on a fresh root, so `bootbob-first-bo
 host keys and a new machine-id each time (the Pi image; the PC image shares one set across every
 copy, which is its own problem). `known_hosts` complains after every rollout. Keeping a machine's
 identity across versions needs somewhere for it to live outside the root.
+
+## No way to export a disk read-only to a machine
+
+`Export` has a `read_only` field, but `backend/crates/bootbob/src/nbd.rs` always sets it to
+`false` (both the local and the store export paths), and nothing in the image model can ask
+for it. A machine that only needs a pristine root, such as a CI runner that reboots after every
+job and keeps its writes in a tmpfs overlay, can still write to its copy-on-write overlay as
+root. That means a job that gets root can persist something into the next boot. It matters for
+the dfu-programmer hardware CI Pi (the AVR Test HAT), which wants "nothing a job does
+survives a reboot" enforced by the server, not only by the Pi's own mounts. Wanted: a per-image
+(or per-assignment) "read-only" setting that exports the disk read-only and refuses writes.
+TFTP boot-file reads are unaffected.
