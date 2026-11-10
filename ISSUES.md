@@ -65,3 +65,17 @@ the dfu-programmer hardware CI Pi (the AVR Test HAT), which wants "nothing a job
 survives a reboot" enforced by the server, not only by the Pi's own mounts. Wanted: a per-image
 (or per-assignment) "read-only" setting that exports the disk read-only and refuses writes.
 TFTP boot-file reads are unaffected.
+
+## Anything on the LAN can drive BootBob, and claim to be any machine
+
+The HTTP API on `:8067` has no authentication: anything that can reach it can reassign what
+every machine boots, upload or delete disks, and reset overlays (Caddy's LAN-only check on
+`pxe.tsl` doesn't cover the bare `10.255.0.5:8067` that machines use). NBD and Pi TFTP decide
+who a client is from its IP-to-MAC mapping (`State::mac_for`, the DHCP listener or
+`/proc/net/arp`) or from a MAC prefix in the TFTP path, so a host that takes over a MAC/IP
+(or just asks with another Pi's MAC prefix) gets that machine's disk, read-write over NBD.
+It matters because a netbooted machine running untrusted code, such as the dfu-programmer
+hardware CI Pi, could take over desky or any PXE machine's next boot. That's why the CI Pi
+is going on its own VLAN. A related limitation: NBD can't identify a client on another
+subnet at all ("BootBob doesn't know which machine {ip} is"), so routed machines can only
+TFTP-boot (with `TFTP_PREFIX=2`).
