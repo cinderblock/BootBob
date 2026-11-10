@@ -64,8 +64,7 @@ services = ["tftp", "http", "nbd"]
 url = "http://10.5.0.5:8067"  # optional: what machines here are told to fetch from
 ```
 
-Today's file (no `[control]`/`[[boot]]`) keeps working: it becomes one control listener
-and one boot interface on the same address, as now.
+The old single-interface keys are refused in server mode (breaking change, approved).
 
 Open (question 5): a boot interface and the control listener on the same address and
 port. Proposed: allowed, served by one socket with both route sets, so every existing
@@ -134,11 +133,23 @@ the segment.
   (Cameron, 2026-11-10).
 - Unadmitted machines are held at BootBob's boot menu until a local user or remote admin
   says what to do; they get only public images (Cameron, 2026-11-10).
+- An unadmitted Pi gets nothing and shows as waiting until an admin acts (Cameron).
+- Unadmitted-is-held is the default on **every** boot interface, eno1 included (Cameron).
+  Machines already in the database are admitted to the first boot interface on upgrade, so
+  desky and friends keep booting, but aren't admitted to new VLANs.
+- Control and a boot interface may share one address:port; one socket serves both route
+  sets (Cameron: "sounds fine").
+- Breaking config changes are fine: "no existing machines" depend on the old shape
+  (Cameron). Server mode moves to `[control]` + `[[boot]]`; the old `interface`/`http`/
+  `tftp`/`nbd`/`public_url`/`mdns` keys are refused in server mode with a message saying
+  what replaces them. Store mode keeps `http`/`nbd`.
+- Assigning an image to an unadmitted machine also admits it, to the interface it was last
+  seen on (Cameron).
 
 ## Plan / steps
 
-1. **← current** Agree the design with Cameron (questions below).
-2. Config: `[[interfaces]]`, legacy synthesis, validation, tests.
+1. Agree the design with Cameron. Done.
+2. **← current** Config: `[[interfaces]]`, legacy synthesis, validation, tests.
 3. Interface discovery: `getifaddrs` + `/proc/net/vlan/config` parser, tests.
 4. Per-interface identity: tagged listener, `(iface, ip)` addresses, neighbour filter.
 5. Binding: `SO_BINDTODEVICE` sockets for TFTP (incl. transfers), NBD, HTTP; interface
@@ -160,7 +171,7 @@ the segment.
 ## Progress log
 
 - [x] Read README, ISSUES, config/state/tftp/nbd/http, dhcp crate, prod config
-- [ ] Design agreed
+- [x] Design agreed (2026-11-10), except question 3 (stores), which only affects the ops step
 - [ ] Implementation steps 2–9
 - [ ] Ops changes staged
 
@@ -170,16 +181,10 @@ the segment.
 2. ~~API/UI on restricted interfaces~~: answered, separate config sets.
 3. Stores: OK that VLAN-served disks must live on steamboat for now? (Recommend yes.)
 4. ~~Config shape~~: superseded by `[control]` + `[[boot]]`.
-5. Control and a boot interface sharing one address:port, served by one socket with both
-   route sets? (Recommend yes, for compatibility.)
-6. Pis can't show a menu. An unadmitted Pi: gets nothing and shows as waiting until an
-   admin acts (recommended), or boots a public Pi default if one is set?
-7. Does "unadmitted = held at the menu" apply on eno1 too (today unknown machines there get
-   the site default), or is it a per-boot-interface setting? (Recommend per interface,
-   eno1 keeping today's behaviour until you flip it.)
-8. Does an admin assigning an image to an unadmitted machine also admit it (one click), or
-   are admit and assign separate? (Recommend: assigning admits it to the interface it was
-   last seen on.)
+5. ~~Shared address:port~~: yes.
+6. ~~Unadmitted Pi~~: nothing, waiting.
+7. ~~eno1 too~~: yes, unadmitted-is-held everywhere by default.
+8. ~~Assign admits~~: yes.
 
 ## Things not to do
 
