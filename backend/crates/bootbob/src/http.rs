@@ -1,8 +1,19 @@
-//! HTTP: iPXE scripts for machines, the JSON API and live feed for the web UI, and the UI.
+//! HTTP, in two separate parts:
+//!
+//! - [`control_router`]: the web UI, the JSON API and its live feed. People and image stores
+//!   use it; it boots nothing.
+//! - [`boot_router`]: what booting machines fetch on one boot interface (iPXE scripts, disk
+//!   boot files, the rollout check-in, iPXE builds and tools). No UI, no API. A machine is
+//!   who the interface's neighbour table says it is; the `mac=` it sends is only checked
+//!   against that.
+//!
+//! A socket the control plane and a boot interface share serves both ([`shared_router`]).
 
 use std::convert::Infallible;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::{ConnectInfo, Path, Query, State as Ax};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -23,12 +34,32 @@ use crate::tftp::PI_FIRMWARE;
 
 type St = Arc<State>;
 
-pub fn router(st: St) -> Router {
-    let mut r = Router::new()
+/// The boot interface a request came in on. Every boot listener's router carries one.
+#[derive(Debug, Clone)]
+pub struct Ingress(pub Arc<str>);
+
+/// One boot interface's routes: only what booting machines fetch.
+pub fn boot_router(st: St, iface: &str) -> Router {
+    Router::new()
         .route("/boot/ipxe", get(boot_ipxe))
         .route("/boot/ipxe/chose", get(boot_chose))
         .route("/boot/disk/{image}/{*path}", get(disk_file))
         .route("/boot/rollout", get(boot_rollout))
+        .nest_service("/files/ipxe", ServeDir::new(&st.config.ipxe_dir))
+        .nest_service("/files/cache", ServeDir::new(crate::cache::files_dir(&st)))
+        .nest_service("/files/tools", ServeDir::new(st.config.tools_dir()))
+        .layer(Extension(Ingress(iface.into())))
+        .with_state(st)
+}
+
+/// A socket the control plane shares with boot interface `iface`: both route sets.
+pub fn shared_router(st: St, iface: &str) -> Router {
+    boot_router(st.clone(), iface).merge(control_router(st))
+}
+
+/// The control plane: the web UI and the management API. Nothing a booting machine needs.
+pub fn control_router(st: St) -> Router {
+    let mut r = Router::new()
         .route("/files/usb/bootbob-usb.img", get(usb_stick))
         .route("/api/status", get(status))
         .route("/api/devices", get(list_devices))
@@ -59,10 +90,8 @@ pub fn router(st: St) -> Router {
         .route("/api/events", get(list_events))
         .route("/api/doctor", get(last_report).post(run_doctor))
         .route("/api/stream", get(stream))
-        .route("/theme.css", get(theme_css))
-        .nest_service("/files/ipxe", ServeDir::new(&st.config.ipxe_dir))
-        .nest_service("/files/cache", ServeDir::new(crate::cache::files_dir(&st)))
-        .nest_service("/files/tools", ServeDir::new(st.config.tools_dir()));
+        .route("/api/devices/{mac}/admitted/{iface}", put(admit_device).delete(unadmit_device))
+        .route("/theme.css", get(theme_css));
     r = match st.config.web_dir.clone().filter(|d| d.join("index.html").exists()) {
         Some(dir) => r.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
         None => r.fallback(no_ui),
@@ -101,15 +130,32 @@ fn ipxe(body: String) -> Response {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], body).into_response()
 }
 
-/// BootBob's URL as this client reached it.
-fn base_url(st: &State, headers: &HeaderMap) -> String {
-    if let Some(u) = &st.config.public_url {
-        return u.trim_end_matches('/').to_string();
-    }
-    match headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
+/// BootBob's URL for machines on boot interface `iface`: its `url`, else its address.
+fn base_url(st: &State, iface: &str, headers: &HeaderMap) -> String {
+    st.boot_url(iface).unwrap_or_else(|| match headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
         Some(host) => format!("http://{host}"),
-        None => format!("http://{}", st.config.http),
+        None => "http://bootbob".into(),
+    })
+}
+
+/// Which machine is asking: whatever the boot interface's neighbour table says is at the
+/// peer's address. A machine's own word for its MAC (`mac=`) is only checked against that,
+/// so nothing on one interface can speak for a machine by naming it.
+pub(crate) fn who(st: &State, iface: &str, peer: SocketAddr, claimed: Option<&str>) -> Result<Mac, String> {
+    let IpAddr::V4(ip) = peer.ip().to_canonical() else { return Err("IPv6 clients aren't supported".into()) };
+    let known = st.mac_for(iface, ip).ok_or_else(|| format!("{ip} isn't a machine BootBob can see on {}", st.iface_label(iface)))?;
+    if let Some(c) = claimed.filter(|c| !c.is_empty()) {
+        let c: Mac = c.parse()?;
+        if c != known {
+            return Err(format!("{ip} on {} said it was {c}, but it's {known}", st.iface_label(iface)));
+        }
     }
+    Ok(known)
+}
+
+/// [`who`], logging a refusal: a machine claiming another's MAC is worth seeing.
+fn who_or_log(st: &State, iface: &str, peer: SocketAddr, claimed: Option<&str>) -> Option<Mac> {
+    who(st, iface, peer, claimed).map_err(|e| st.event(None, "refused", e)).ok()
 }
 
 // ---- iPXE ----
@@ -131,12 +177,21 @@ struct Identity {
     item: Option<String>,
 }
 
-/// Records what a machine says about itself on every script fetch.
-fn record_identity(st: &State, mac: Mac, q: &Identity) -> Device {
+/// Records what a machine says about itself on every script fetch. Where it isn't admitted,
+/// a machine admitted elsewhere keeps the description it has: whatever is asking may not be
+/// it.
+fn record_identity(st: &State, iface: &str, peer: SocketAddr, mac: Mac, q: &Identity) -> Device {
+    let ip = match peer.ip().to_canonical() {
+        IpAddr::V4(a) => Some(a),
+        _ => None,
+    };
+    st.note_sighting(mac, iface, ip);
     st.update_device(mac, |d| {
         let now = now_ms();
-        d.last_seen = now;
         d.last_script = Some(now);
+        if !d.speaks_for(iface) {
+            return;
+        }
         if let Some(ip) = q.ip.as_deref().filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| !ip.is_unspecified())) {
             d.ip = Some(ip.to_string());
         }
@@ -160,18 +215,26 @@ fn record_identity(st: &State, mac: Mac, q: &Identity) -> Device {
     .0
 }
 
+/// Where a menu is shown: on which boot interface, and whether the machine is admitted there
+/// (if not, it lists only public images).
+#[derive(Clone, Copy)]
+struct Seat<'a> {
+    iface: &'a str,
+    admitted: bool,
+}
+
 /// The fallback menu for `dev`. `poll` makes it check back for an assignment.
-fn menu_script(st: &State, dev: &Device, base: String, status_line: String, poll: bool) -> String {
+fn menu_script(st: &State, seat: Seat, dev: &Device, base: String, status_line: String, poll: bool) -> String {
     let poll_secs = if poll { st.settings().poll_secs } else { 0 };
-    menu_with(st, dev, base, status_line, poll_secs, None)
+    menu_with(st, seat, dev, base, status_line, poll_secs, None)
 }
 
 /// [`menu_script`], checking back every `poll_secs`, at `refresh` if that's given.
-fn menu_with(st: &State, dev: &Device, base: String, status_line: String, poll_secs: u32, refresh: Option<String>) -> String {
+fn menu_with(st: &State, seat: Seat, dev: &Device, base: String, status_line: String, poll_secs: u32, refresh: Option<String>) -> String {
     let settings = st.settings();
     let mut groups: Vec<(String, Vec<MenuItem>)> = Vec::new();
     for img in st.images() {
-        if img.group.is_empty() || (img.action.is_none() && img.disk.is_none()) {
+        if img.group.is_empty() || (img.action.is_none() && img.disk.is_none()) || (!seat.admitted && !img.public) {
             continue;
         }
         let item = MenuItem { id: img.id.clone(), title: img.title.clone() };
@@ -180,7 +243,7 @@ fn menu_with(st: &State, dev: &Device, base: String, status_line: String, poll_s
             None => groups.push((img.group.clone(), vec![item])),
         }
     }
-    let ip = dev.ip.as_deref().map(|ip| format!(" at {ip}")).unwrap_or_default();
+    let ip = dev.seen.get(seat.iface).and_then(|s| s.ip.as_deref()).or(dev.ip.as_deref()).map(|ip| format!(" at {ip}")).unwrap_or_default();
     bootbob_ipxe::menu(&Menu {
         base_url: base,
         title: "BootBob".into(),
@@ -199,7 +262,7 @@ const WAIT_POLL_SECS: u32 = 5;
 
 /// Whether a PC can boot `image` yet. `Some`: the script to answer with instead. `refresh`
 /// is where it should check back, if not `/boot/ipxe`.
-async fn held(st: &St, mac: Mac, dev: &Device, image: &Image, base: &str, refresh: Option<String>) -> Option<String> {
+async fn held(st: &St, seat: Seat<'_>, mac: Mac, dev: &Device, image: &Image, base: &str, refresh: Option<String>) -> Option<String> {
     let entries = crate::catalogue::for_pc(st, image);
     if entries.is_empty() {
         return None;
@@ -211,7 +274,7 @@ async fn held(st: &St, mac: Mac, dev: &Device, image: &Image, base: &str, refres
         Hold::Wait(detail) => {
             st.note_waiting(mac, &image.id, &detail);
             let status = format!("Waiting to boot {}\n{detail}\nIt boots by itself once that's done.", image.title);
-            Some(menu_with(st, dev, base.to_string(), status, WAIT_POLL_SECS, refresh))
+            Some(menu_with(st, seat, dev, base.to_string(), status, WAIT_POLL_SECS, refresh))
         }
         Hold::Failed(why) => {
             let first = dev.waiting.is_some() || !dev.last_script.is_some_and(|t| now_ms().saturating_sub(t) < 60_000);
@@ -219,7 +282,7 @@ async fn held(st: &St, mac: Mac, dev: &Device, image: &Image, base: &str, refres
             if first {
                 st.event(Some(mac), "error", format!("Can't boot {}: {why}", image.title));
             }
-            Some(menu_script(st, dev, base.to_string(), format!("Can't boot {}.\n{why}", image.title), true))
+            Some(menu_script(st, seat, dev, base.to_string(), format!("Can't boot {}.\n{why}", image.title), true))
         }
     }
 }
@@ -229,26 +292,33 @@ fn human_secs(s: u64) -> String {
     if s < 60 { format!("{s} s") } else { format!("about {} min", s.div_ceil(60)) }
 }
 
-/// A machine with no usable identity: a menu without polling.
-fn anonymous_menu(st: &State, base: String) -> String {
+/// A machine with no usable identity: a menu of public images, without polling.
+fn anonymous_menu(st: &State, iface: &str, base: String) -> String {
     let dev = Device { mac: "unknown".into(), ..Default::default() };
-    menu_script(st, &dev, base, "BootBob couldn't tell which machine this is".into(), false)
+    menu_script(st, Seat { iface, admitted: false }, &dev, base, "BootBob couldn't tell which machine this is".into(), false)
 }
 
-async fn boot_ipxe(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>) -> Response {
-    let base = base_url(&st, &headers);
-    let Some(mac) = q.mac.as_deref().and_then(|m| m.parse::<Mac>().ok()) else {
-        // Worth seeing: an iPXE that isn't ours, or a broken identity query.
-        st.event(
-            None,
-            "error",
-            format!("A machine asked for a boot script without a usable MAC (mac={:?})", q.mac.as_deref().unwrap_or("")),
-        );
-        return ipxe(anonymous_menu(&st, base));
+async fn boot_ipxe(
+    Ax(st): Ax<St>,
+    Extension(Ingress(iface)): Extension<Ingress>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<Identity>,
+) -> Response {
+    let base = base_url(&st, &iface, &headers);
+    let Some(mac) = who_or_log(&st, &iface, peer, q.mac.as_deref()) else {
+        return ipxe(anonymous_menu(&st, &iface, base));
     };
     let polling = q.poll.is_some();
-    let dev = record_identity(&st, mac, &q);
-    let res = st.resolve(&dev);
+    let dev = record_identity(&st, &iface, peer, mac, &q);
+    let admitted = dev.is_admitted(&iface);
+    let seat = Seat { iface: &iface, admitted };
+    // A machine that isn't admitted here is held at the menu until a person says otherwise.
+    let res = if admitted {
+        st.resolve(&dev)
+    } else {
+        crate::state::Resolved { image: "menu".into(), reason: format!("not admitted on {}", st.iface_label(&iface)), once: false }
+    };
 
     // A boot that failed comes back here; going straight back to the same image would
     // loop forever, so it gets the menu.
@@ -278,7 +348,15 @@ async fn boot_ipxe(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>
         } else {
             String::new()
         };
-        let status = if failed {
+        let status = if !admitted {
+            if !polling && !recently_at_menu {
+                st.event(Some(mac), "menu", format!("Held at the fallback menu ({})", res.reason));
+            }
+            format!(
+                "This machine isn't admitted on {}.\nChoose a public image here, or admit it in the web UI.{then}",
+                st.iface_label(&iface)
+            )
+        } else if failed {
             let what = dev.last_boot.as_ref().map(|b| b.title.clone()).unwrap_or_else(|| "the last image".into());
             if !polling {
                 st.event(Some(mac), "failed", format!("Booting {what} failed; back at the menu"));
@@ -291,15 +369,15 @@ async fn boot_ipxe(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>
             format!("No image assigned: choose one here, or assign one in the web UI.{then}")
         };
         let dev = st.device(mac).unwrap_or(dev);
-        return ipxe(menu_script(&st, &dev, base, status, true));
+        return ipxe(menu_script(&st, seat, &dev, base, status, true));
     }
 
     if let Some(i) = st.image(&res.image)
-        && let Some(script) = held(&st, mac, &dev, &i, &base, None).await
+        && let Some(script) = held(&st, seat, mac, &dev, &i, &base, None).await
     {
         return ipxe(script);
     }
-    let Some(action) = st.image(&res.image).and_then(|i| pc_action(&st, &i, mac, &base)) else {
+    let Some(action) = st.image(&res.image).and_then(|i| pc_action(&st, &iface, &i, mac, &base)) else {
         let why = match st.image(&res.image) {
             Some(i) if i.pi.is_some() => format!(
                 "{} is for Raspberry Pis only.
@@ -308,19 +386,19 @@ Choose something here, or reassign it in the web UI.",
             ),
             _ => format!("Image {} has nothing to boot", res.image),
         };
-        return ipxe(menu_script(&st, &dev, base, why, true));
+        return ipxe(menu_script(&st, seat, &dev, base, why, true));
     };
     st.record_boot(mac, &res.image, &res.reason, res.once);
     let title = st.image(&res.image).map(|i| i.title).unwrap_or_default();
     ipxe(bootbob_ipxe::boot(&action, &title, &base))
 }
 
-/// BootBob's address for NBD, as a machine reaches it: the configured NBD address,
+/// BootBob's address for NBD, as a machine on `iface` reaches it: the interface's address,
 /// else the host in `base` (the URL the machine fetched its script from).
-fn nbd_server(st: &State, base: &str) -> String {
-    match st.config.nbd {
-        Some(a) if !a.ip().is_unspecified() => a.ip().to_string(),
-        _ => {
+fn nbd_server(st: &State, iface: &str, base: &str) -> String {
+    match st.boot_address(iface) {
+        Some(a) => a.to_string(),
+        None => {
             let host = base.split("://").nth(1).unwrap_or(base);
             let host = host.split('/').next().unwrap_or(host);
             host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host).to_string()
@@ -331,7 +409,7 @@ fn nbd_server(st: &State, base: &str) -> String {
 /// What a PC does with an image: its iPXE action, or for a disk image, its kernel and
 /// initrd from the image's boot partition (through this machine's copy-on-write overlay
 /// when it has one) with the command line filled in. `None`: nothing for PCs.
-pub(crate) fn pc_action(st: &State, img: &Image, mac: Mac, base: &str) -> Option<bootbob_ipxe::Action> {
+pub(crate) fn pc_action(st: &State, iface: &str, img: &Image, mac: Mac, base: &str) -> Option<bootbob_ipxe::Action> {
     if let Some(a) = &img.action {
         return Some(crate::catalogue::fill(st, a, base));
     }
@@ -339,10 +417,10 @@ pub(crate) fn pc_action(st: &State, img: &Image, mac: Mac, base: &str) -> Option
     let m = mac.0;
     let dashed = format!("{:02x}-{:02x}-{:02x}-{:02x}-{:02x}-{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
     let url = |f: &str| format!("{base}/boot/disk/{}/{}?mac={dashed}", img.id, f.trim_start_matches('/'));
-    let ip = st.device(mac).and_then(|d| d.ip).unwrap_or_default();
+    let ip = st.device(mac).and_then(|d| d.seen.get(iface).and_then(|s| s.ip.clone()).or(d.ip)).unwrap_or_default();
     let cmdline = d
         .cmdline
-        .replace("{server}", &crate::stores::nbd_host(&st.config, &d.source, nbd_server(st, base)))
+        .replace("{server}", &crate::stores::nbd_host(&st.config, &d.source, nbd_server(st, iface, base)))
         .replace("{disk}", crate::stores::export_name(&d.source))
         .replace("{bootbob}", base)
         .replace("{mac}", &dashed)
@@ -362,10 +440,16 @@ struct RolloutQuery {
 
 /// A running machine checking in: one word back, for a shell script. Anything else it gets,
 /// or nothing, means stay.
-async fn boot_rollout(Ax(st): Ax<St>, Query(q): Query<RolloutQuery>) -> Response {
-    let answer = match q.mac.parse::<Mac>() {
-        Ok(mac) => crate::rollout::check(&st, mac, &q.health, &q.busy),
-        Err(_) => crate::rollout::STAY,
+async fn boot_rollout(
+    Ax(st): Ax<St>,
+    Extension(Ingress(iface)): Extension<Ingress>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<RolloutQuery>,
+) -> Response {
+    // Only a machine admitted here can be moved: anything else stays put.
+    let answer = match who_or_log(&st, &iface, peer, Some(&q.mac)) {
+        Some(mac) if st.device(mac).is_some_and(|d| d.is_admitted(&iface)) => crate::rollout::check(&st, mac, &q.health, &q.busy),
+        _ => crate::rollout::STAY,
     };
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], format!("{answer}\n")).into_response()
 }
@@ -377,13 +461,25 @@ struct MacQuery {
 
 /// A file from a PC disk image's boot partition: the kernel and initrd iPXE asks for.
 /// Read through the machine's overlay when the image is copy-on-write and it has one
-/// (a kernel it installed lives there).
-async fn disk_file(Ax(st): Ax<St>, Path((image, path)): Path<(String, String)>, Query(q): Query<MacQuery>) -> Response {
-    let Some(d) = st.image(&image).and_then(|i| i.disk) else {
+/// (a kernel it installed lives there). Only for a machine admitted here, or from a public
+/// image.
+async fn disk_file(
+    Ax(st): Ax<St>,
+    Extension(Ingress(iface)): Extension<Ingress>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((image, path)): Path<(String, String)>,
+    Query(q): Query<MacQuery>,
+) -> Response {
+    let Some(img) = st.image(&image) else { return not_found("disk image").into_response() };
+    let Some(d) = img.disk.clone() else {
         return not_found("disk image").into_response();
     };
     let Some(path) = bootbob_tftp::clean_path(&path) else { return bad("bad path").into_response() };
-    let mac = q.mac.as_deref().and_then(|m| m.parse::<Mac>().ok());
+    let mac = q.mac.as_deref().and_then(|_| who_or_log(&st, &iface, peer, q.mac.as_deref()));
+    let admitted = mac.and_then(|m| st.device(m)).is_some_and(|dev| dev.is_admitted(&iface));
+    if !admitted && !img.public {
+        return ApiError(StatusCode::FORBIDDEN, format!("{image} isn't public, and this machine isn't admitted here")).into_response();
+    }
     let look = move || -> std::io::Result<Option<Vec<u8>>> {
         let found = crate::stores::boot_file(&st, &d.source, d.cow, mac, &path)?;
         Ok(match found {
@@ -402,7 +498,11 @@ async fn disk_file(Ax(st): Ax<St>, Path((image, path)): Path<(String, String)>, 
 
 /// A USB boot stick that finds this server (see `usb.rs`).
 async fn usb_stick(Ax(st): Ax<St>, headers: HeaderMap) -> Response {
-    let url = base_url(&st, &headers);
+    // The stick finds the first boot interface: the LAN.
+    let url = match st.config.boot.first() {
+        Some(b) => base_url(&st, &b.interface, &headers),
+        None => return ApiError(StatusCode::NOT_FOUND, "no boot interfaces are configured".into()).into_response(),
+    };
     let dir = st.config.ipxe_dir.clone();
     match tokio::task::spawn_blocking(move || crate::usb::stick(&dir, &url)).await {
         Ok(Ok(img)) => (
@@ -415,25 +515,34 @@ async fn usb_stick(Ax(st): Ax<St>, headers: HeaderMap) -> Response {
     }
 }
 
-async fn boot_chose(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity>) -> Response {
-    let base = base_url(&st, &headers);
-    let Some(mac) = q.mac.as_deref().and_then(|m| m.parse::<Mac>().ok()) else {
-        return ipxe(anonymous_menu(&st, base));
+async fn boot_chose(
+    Ax(st): Ax<St>,
+    Extension(Ingress(iface)): Extension<Ingress>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<Identity>,
+) -> Response {
+    let base = base_url(&st, &iface, &headers);
+    let Some(mac) = who_or_log(&st, &iface, peer, q.mac.as_deref()) else {
+        return ipxe(anonymous_menu(&st, &iface, base));
     };
-    let dev = record_identity(&st, mac, &q);
+    let dev = record_identity(&st, &iface, peer, mac, &q);
+    let seat = Seat { iface: &iface, admitted: dev.is_admitted(&iface) };
     let item = q.item.unwrap_or_default();
-    if let Some(i) = st.image(&item) {
+    // Only what this machine's menu listed.
+    let image = st.image(&item).filter(|i| seat.admitted || i.public);
+    if let Some(i) = &image {
         let again = format!("/boot/ipxe/chose?${{bootbob-id}}&item={item}");
-        if let Some(script) = held(&st, mac, &dev, &i, &base, Some(again)).await {
+        if let Some(script) = held(&st, seat, mac, &dev, i, &base, Some(again)).await {
             return ipxe(script);
         }
     }
-    match st.image(&item).and_then(|i| pc_action(&st, &i, mac, &base).map(|a| (i.title, a))) {
+    match image.and_then(|i| pc_action(&st, &iface, &i, mac, &base).map(|a| (i.title, a))) {
         Some((title, action)) => {
             st.record_boot(mac, &item, "chosen at the menu", false);
             ipxe(bootbob_ipxe::boot(&action, &title, &base))
         }
-        None => ipxe(menu_script(&st, &dev, base, format!("There's no {item:?} any more; choose again"), true)),
+        None => ipxe(menu_script(&st, seat, &dev, base, format!("There's no {item:?} here; choose again"), true)),
     }
 }
 
@@ -443,12 +552,52 @@ async fn boot_chose(Ax(st): Ax<St>, headers: HeaderMap, Query(q): Query<Identity
 struct StatusOut {
     version: &'static str,
     boot_filename: String,
-    tftp: Option<String>,
-    http: String,
-    public_url: Option<String>,
-    listener: crate::state::ListenerStatus,
+    /// Where the UI and API listen.
+    control: Vec<String>,
+    /// The boot interfaces.
+    interfaces: Vec<IfaceOut>,
     ipxe_builds: Vec<String>,
     devices: usize,
+}
+
+/// A boot interface, as the UI shows it.
+#[derive(Serialize)]
+pub struct IfaceOut {
+    pub interface: String,
+    pub label: String,
+    /// The 802.1Q VLAN id, for a VLAN subinterface.
+    pub vlan: Option<u16>,
+    pub parent: Option<String>,
+    /// The address it serves on. `None`: the interface isn't there yet, or has no address.
+    pub address: Option<String>,
+    pub url: Option<String>,
+    pub services: Vec<crate::config::Service>,
+    pub listener: Option<crate::state::ListenerStatus>,
+    /// Machines admitted to it.
+    pub admitted: usize,
+}
+
+pub fn interfaces(st: &State) -> Vec<IfaceOut> {
+    let listeners = st.listeners.read().unwrap().clone();
+    let devices = st.devices();
+    st.config
+        .boot
+        .iter()
+        .map(|b| {
+            let n = st.netif(&b.interface);
+            IfaceOut {
+                interface: b.interface.clone(),
+                label: b.label().to_string(),
+                vlan: n.as_ref().and_then(|n| n.vlan),
+                parent: n.as_ref().and_then(|n| n.parent.clone()),
+                address: st.boot_address(&b.interface).map(|a| a.to_string()),
+                url: st.boot_url(&b.interface),
+                services: b.services.clone(),
+                listener: listeners.get(&b.interface).cloned(),
+                admitted: devices.iter().filter(|d| d.is_admitted(&b.interface)).count(),
+            }
+        })
+        .collect()
 }
 
 async fn status(Ax(st): Ax<St>) -> Json<StatusOut> {
@@ -459,10 +608,8 @@ async fn status(Ax(st): Ax<St>) -> Json<StatusOut> {
     Json(StatusOut {
         version: env!("CARGO_PKG_VERSION"),
         boot_filename: st.config.boot_filename.clone(),
-        tftp: st.config.tftp.map(|a| a.to_string()),
-        http: st.config.http.to_string(),
-        public_url: st.config.public_url.clone(),
-        listener: st.listener.read().unwrap().clone(),
+        control: st.config.control.http.iter().map(|a| a.to_string()).collect(),
+        interfaces: interfaces(&st),
         ipxe_builds: builds,
         devices: st.devices().len(),
     })
@@ -521,14 +668,17 @@ pub fn view(st: &State, d: Device) -> DeviceView {
     } else {
         ("seen", "Seen on the network".to_string())
     };
-    let r = if is_pi {
-        st.resolve_pi(&d).unwrap_or_else(|| crate::state::Resolved {
+    // Where it was last seen, if it isn't admitted there, decides; else what it's assigned.
+    let held_on = d.last_seen_on().filter(|i| !d.is_admitted(i)).map(|i| st.iface_label(i));
+    let r = match held_on {
+        Some(on) if is_pi => crate::state::Resolved { image: String::new(), reason: format!("not admitted on {on}"), once: false },
+        Some(on) => crate::state::Resolved { image: "menu".into(), reason: format!("not admitted on {on}"), once: false },
+        None if is_pi => st.resolve_pi(&d).unwrap_or_else(|| crate::state::Resolved {
             image: String::new(),
             reason: "no Pi image assigned, and no Raspberry Pi default".into(),
             once: false,
-        })
-    } else {
-        st.resolve(&d)
+        }),
+        None => st.resolve(&d),
     };
     let title = match st.image(&r.image) {
         Some(i) => i.title,
@@ -596,6 +746,18 @@ async fn delete_device(Ax(st): Ax<St>, Path(mac): Path<String>) -> Result<Status
 
 async fn put_assignment(Ax(st): Ax<St>, Path(mac): Path<String>, Json(a): Json<Assignment>) -> Result<Json<DeviceView>, ApiError> {
     let d = st.assign(parse_mac(&mac)?, Some(a)).map_err(bad)?;
+    Ok(Json(view(&st, d)))
+}
+
+async fn admit_device(Ax(st): Ax<St>, Path((mac, iface)): Path<(String, String)>) -> Result<Json<DeviceView>, ApiError> {
+    let d = st.set_admitted(parse_mac(&mac)?, &iface, true).map_err(|e| ApiError(StatusCode::NOT_FOUND, e))?;
+    Ok(Json(view(&st, d)))
+}
+
+async fn unadmit_device(Ax(st): Ax<St>, Path((mac, iface)): Path<(String, String)>) -> Result<Json<DeviceView>, ApiError> {
+    let mac = parse_mac(&mac)?;
+    st.device(mac).ok_or_else(|| not_found("device"))?;
+    let d = st.set_admitted(mac, &iface, false).map_err(|e| ApiError(StatusCode::NOT_FOUND, e))?;
     Ok(Json(view(&st, d)))
 }
 

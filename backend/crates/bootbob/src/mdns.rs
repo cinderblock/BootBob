@@ -2,12 +2,14 @@
 //! the same network (BenchBob) find it without being told an address. TXT records: the
 //! URL machines and tools use, the version, and what it can do.
 //!
-//! Only on the interface the DHCP listener watches (`interface` in the config): a server
-//! with public addresses or container bridges shouldn't announce itself there.
+//! Only on the control network (`[control] network` in the config): a server with public
+//! addresses, container bridges or untrusted boot VLANs shouldn't announce itself there.
+
+use std::net::Ipv4Addr;
 
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 
-use crate::config::Config;
+use crate::state::State;
 
 pub const SERVICE: &str = "_bootbob._tcp.local.";
 
@@ -25,32 +27,43 @@ fn hostname() -> String {
 }
 
 /// What the TXT records say, for the tests and the advertisement.
-pub fn txt(config: &Config) -> Vec<(String, String)> {
-    let ip = config.http.ip();
-    let url = config.public_url.clone().unwrap_or_else(|| format!("http://{}:{}", ip, config.http.port()));
+pub fn txt(url: &str, nbd: bool) -> Vec<(String, String)> {
     let mut caps = vec!["ipxe", "pi", "usb"];
-    if config.nbd.is_some() {
+    if nbd {
         caps.push("nbd");
     }
-    vec![("url".into(), url), ("version".into(), env!("CARGO_PKG_VERSION").into()), ("caps".into(), caps.join(","))]
+    vec![("url".into(), url.into()), ("version".into(), env!("CARGO_PKG_VERSION").into()), ("caps".into(), caps.join(","))]
 }
 
-/// Starts advertising. `None` when it's off (`mdns = false`, or no `interface`). Keep the
-/// daemon alive for as long as BootBob should be advertised.
-pub fn advertise(config: &Config) -> anyhow::Result<Option<ServiceDaemon>> {
-    let Some(iface) = config.interface.clone().filter(|_| config.mdns) else { return Ok(None) };
-    let ip = config.http.ip();
+/// What to advertise: the boot interface on the control network (else the first one), as
+/// its URL, its address and whether it serves NBD. `None` when it's off (`mdns = false`, or
+/// no `network`) or there's nothing to point at.
+pub fn what(st: &State) -> Option<(String, String, Option<Ipv4Addr>, bool)> {
+    let c = &st.config.control;
+    let iface = c.network.clone().filter(|_| c.mdns)?;
+    let b = st.config.boot_iface(&iface).or(st.config.boot.first())?;
+    let url = st.boot_url(&b.interface)?;
+    Some((iface, url, st.boot_address(&b.interface), b.serves(crate::config::Service::Nbd)))
+}
+
+/// Starts advertising. `None` when it's off. Keep the daemon alive for as long as BootBob
+/// should be advertised.
+pub fn advertise(st: &State) -> anyhow::Result<Option<ServiceDaemon>> {
+    let Some((iface, url, ip, nbd)) = what(st) else { return Ok(None) };
+    let port = url.rsplit_once(':').and_then(|(_, p)| p.trim_end_matches('/').parse().ok()).unwrap_or(crate::config::HTTP_PORT);
     let host = hostname();
     let d = ServiceDaemon::new()?;
     d.disable_interface(IfKind::All)?;
     d.enable_interface(IfKind::Name(iface.clone()))?;
-    let props: Vec<(String, String)> = txt(config);
+    let props: Vec<(String, String)> = txt(&url, nbd);
     let props: Vec<(&str, &str)> = props.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let info = if ip.is_unspecified() {
-        ServiceInfo::new(SERVICE, &format!("BootBob on {host}"), &format!("{host}.local."), "", config.http.port(), &props[..])?
-            .enable_addr_auto()
-    } else {
-        ServiceInfo::new(SERVICE, &format!("BootBob on {host}"), &format!("{host}.local."), ip, config.http.port(), &props[..])?
+    let info = match ip {
+        Some(ip) => {
+            ServiceInfo::new(SERVICE, &format!("BootBob on {host}"), &format!("{host}.local."), std::net::IpAddr::V4(ip), port, &props[..])?
+        }
+        None => {
+            ServiceInfo::new(SERVICE, &format!("BootBob on {host}"), &format!("{host}.local."), "", port, &props[..])?.enable_addr_auto()
+        }
     };
     d.register(info)?;
     tracing::info!(iface, host, "mDNS: advertising {SERVICE}");
@@ -63,22 +76,25 @@ mod tests {
 
     #[test]
     fn txt_records() {
-        let mut c = Config { http: "10.255.0.5:8067".parse().unwrap(), ..Config::default() };
-        let t = txt(&c);
+        let t = txt("http://10.255.0.5:8067", false);
         assert_eq!(t[0], ("url".into(), "http://10.255.0.5:8067".into()));
         assert_eq!(t[2].1, "ipxe,pi,usb");
-        c.nbd = Some("10.255.0.5:10809".parse().unwrap());
-        c.public_url = Some("http://pxe.example:8067".into());
-        let t = txt(&c);
-        assert_eq!(t[0].1, "http://pxe.example:8067");
-        assert_eq!(t[2].1, "ipxe,pi,usb,nbd");
+        assert_eq!(txt("http://pxe.example:8067", true)[2].1, "ipxe,pi,usb,nbd");
         assert!(!hostname().is_empty());
     }
 
     #[test]
-    fn off_without_an_interface_or_when_disabled() {
-        assert!(advertise(&Config::default()).unwrap().is_none());
-        let c = Config { interface: Some("eth0".into()), mdns: false, ..Config::default() };
-        assert!(advertise(&c).unwrap().is_none());
+    fn off_without_a_network_or_when_disabled() {
+        use crate::config::{BootIface, Config, Control};
+        let dir = tempfile::tempdir().unwrap();
+        let open = |control: Control| {
+            let boot = vec![BootIface::new("eth0", Some(Ipv4Addr::new(10, 255, 0, 5)))];
+            State::open(Config { data_dir: dir.path().to_path_buf(), control, boot, ..Config::default() }).unwrap()
+        };
+        assert!(what(&open(Control::default())).is_none());
+        assert!(what(&open(Control { network: Some("eth0".into()), mdns: false, ..Control::default() })).is_none());
+        let on = what(&open(Control { network: Some("eth0".into()), ..Control::default() })).unwrap();
+        assert_eq!(on.1, "http://10.255.0.5:8067");
+        assert!(on.3);
     }
 }

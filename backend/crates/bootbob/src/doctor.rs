@@ -150,16 +150,17 @@ pub fn evaluate_rogue(offers: &[Offer]) -> Check {
     }
 }
 
-/// BootBob's own address, as machines should be told it.
+/// BootBob's own address, as machines on the control network should be told it: the boot
+/// interface there.
 fn our_address(st: &State) -> Option<String> {
-    if let Some(t) = st.config.tftp
-        && !t.ip().is_unspecified()
-    {
-        return Some(t.ip().to_string());
-    }
-    let url = st.config.public_url.as_deref()?;
-    let host = url.split("://").nth(1)?.split(['/', ':']).next()?;
-    host.parse::<Ipv4Addr>().ok().map(|ip| ip.to_string())
+    let net = st.config.control.network.as_deref()?;
+    st.boot_address(net).map(|a| a.to_string())
+}
+
+/// The DHCP listener on the control network, which the checks and the time zone use.
+fn network_listener(st: &State) -> Option<crate::state::ListenerStatus> {
+    let net = st.config.control.network.as_deref()?;
+    st.listeners.read().unwrap().get(net).cloned()
 }
 
 /// The time zone `offers` give, if they agree on one that exists. A mistyped or disputed
@@ -202,8 +203,8 @@ pub async fn watch_zone(st: Arc<State>) {
 }
 
 async fn learn_zone(st: &State) {
-    let listener = st.listener.read().unwrap().clone();
-    let (Some(iface), true) = (listener.interface, listener.running) else { return };
+    let Some(listener) = network_listener(st).filter(|l| l.running) else { return };
+    let iface = listener.interface;
     // Clear of the two ids `run` takes from the same clock.
     let xid = (now_ms() as u32).wrapping_add(2);
     st.expect_probe(xid);
@@ -244,19 +245,31 @@ pub async fn run(st: &State) -> Report {
         ),
     });
 
-    checks.push(match st.config.tftp {
-        Some(a) => check("tftp", "TFTP is on", Status::Ok, format!("Listening on {a}."), None),
-        None => check(
+    let tftp: Vec<String> = st
+        .config
+        .boot
+        .iter()
+        .filter(|b| b.serves(crate::config::Service::Tftp))
+        .map(|b| match st.boot_address(&b.interface) {
+            Some(a) => format!("{} ({a}:{})", st.iface_label(&b.interface), b.tftp_port),
+            None => format!("{} (waiting for the interface)", st.iface_label(&b.interface)),
+        })
+        .collect();
+    checks.push(if tftp.is_empty() {
+        check(
             "tftp",
             "TFTP is on",
             Status::Fail,
-            "TFTP is off, so firmware PXE can't load iPXE.",
-            Some("Set tftp in the config (e.g. tftp = \"10.255.0.5:69\").".into()),
-        ),
+            "No boot interface serves TFTP, so firmware PXE can't load iPXE.",
+            Some("Add a [[boot]] section for the LAN interface (interface = \"eno1\") to the config.".into()),
+        )
+    } else {
+        check("tftp", "TFTP is on", Status::Ok, format!("On {}.", tftp.join(", ")), None)
     });
 
-    let listener = st.listener.read().unwrap().clone();
-    let probing = match (&listener.interface, listener.running) {
+    let listener = network_listener(st).unwrap_or_default();
+    let net = network_listener(st).map(|l| l.interface);
+    let probing = match (&net, listener.running) {
         (None, _) => {
             checks.push(check(
                 "listener",
@@ -264,7 +277,11 @@ pub async fn run(st: &State) -> Report {
                 Status::Warn,
                 "Off. Without it BootBob can't tell BIOS from UEFI machines (they all get the default build), can't see \
                  machines that fail to reach it, and can't run the DHCP checks.",
-                Some("Set interface in the config to the LAN interface (e.g. interface = \"eno1\").".into()),
+                Some(
+                    "Set [control] network to the LAN interface (network = \"eno1\"), and give it a [[boot]] section with \
+                     the listener on."
+                        .into(),
+                ),
             ));
             None
         }

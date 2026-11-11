@@ -9,6 +9,10 @@
 //!   assigned gets nothing, and the UI shows it waiting.
 //! - Anything else isn't served, but is noted on the device so the UI can say what it
 //!   asked for.
+//!
+//! Each boot interface has its own TFTP server. A requester is whoever that interface's
+//! neighbour table says is at its address; a Pi's MAC prefix is only believed when it
+//! agrees. A Pi that isn't admitted on the interface gets nothing.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -23,8 +27,10 @@ use crate::catalogue::Hold;
 use crate::model::{Device, PI_SESSION_GAP_MS, PiBoot, PiSession, TftpSeen, now_ms};
 use crate::state::State;
 
+/// TFTP on one boot interface.
 pub struct Tftp {
     pub st: Arc<State>,
+    pub iface: String,
 }
 
 /// The iPXE build file for a firmware.
@@ -76,10 +82,10 @@ impl Tftp {
     /// moment we do, so give it a moment if it hasn't recorded the address yet.
     async fn identify(&self, ip: Option<Ipv4Addr>) -> (Option<Mac>, Option<Firmware>) {
         let Some(ip) = ip else { return (None, None) };
-        let mut found = self.st.firmware_for(ip);
+        let mut found = self.st.firmware_for(&self.iface, ip);
         if found.0.is_none() {
             tokio::time::sleep(Duration::from_millis(30)).await;
-            found = self.st.firmware_for(ip);
+            found = self.st.firmware_for(&self.iface, ip);
         }
         found
     }
@@ -87,14 +93,12 @@ impl Tftp {
     fn note(&self, mac: Option<Mac>, ip: Option<Ipv4Addr>, path: &str, served: Option<String>, also: impl FnOnce(&mut Device)) {
         let Some(mac) = mac else { return };
         // Only machines that netboot become devices; this is one.
+        self.st.note_sighting(mac, &self.iface, ip);
         self.st.update_device(mac, |d| {
-            let now = now_ms();
-            d.last_seen = now;
-            if let Some(ip) = ip {
-                d.ip = Some(ip.to_string());
+            d.tftp = Some(TftpSeen { at: now_ms(), path: path.to_string(), served, ok: None });
+            if d.speaks_for(&self.iface) {
+                also(d);
             }
-            d.tftp = Some(TftpSeen { at: now, path: path.to_string(), served, ok: None });
-            also(d);
         });
     }
 
@@ -114,6 +118,27 @@ impl Tftp {
             return Resolution::NotFound;
         };
         let dev = self.st.device(mac).unwrap_or_else(|| Device { mac: mac.to_string(), ..Default::default() });
+        // A Pi can't be held at a menu: one that isn't admitted here gets nothing, and shows
+        // as waiting until someone admits it.
+        if !dev.is_admitted(&self.iface) {
+            let fresh = dev.tftp.as_ref().is_none_or(|t| now_ms().saturating_sub(t.at) >= PI_SESSION_GAP_MS);
+            let serial = match &prefix {
+                Some(Prefix::Serial(s)) => Some(s.clone()),
+                _ => None,
+            };
+            self.note(Some(mac), ip, &path, None, |d| {
+                d.firmware = Some(PI_FIRMWARE.into());
+                if let Some(s) = serial {
+                    d.serial = Some(s);
+                }
+                d.pi_session = None;
+            });
+            if fresh {
+                let label = self.st.iface_label(&self.iface);
+                self.st.event(Some(mac), "netboot", format!("A Raspberry Pi asked to netboot on {label}, but isn't admitted there"));
+            }
+            return Resolution::NotFound;
+        }
         let serial = match &prefix {
             Some(Prefix::Serial(s)) => Some(s.clone()),
             _ => dev.serial.clone().filter(|_| dev.firmware.as_deref() == Some(PI_FIRMWARE)),
@@ -187,13 +212,10 @@ impl Tftp {
         }
         let here = match req.local.ip() {
             a if !a.is_unspecified() => a.to_string(),
-            _ => self.st.config.tftp.map(|t| t.ip().to_string()).unwrap_or_default(),
+            _ => self.st.boot_address(&self.iface).map(|a| a.to_string()).unwrap_or_default(),
         };
         // {server}: where its disk is served (a store's own address for a store image).
-        let bootbob = match &self.st.config.public_url {
-            Some(u) => u.trim_end_matches('/').to_string(),
-            None => format!("http://{here}:{}", self.st.config.http.port()),
-        };
+        let bootbob = self.st.boot_url(&self.iface).unwrap_or_else(|| format!("http://{here}:{}", crate::config::HTTP_PORT));
         let server = crate::stores::nbd_host(&self.st.config, &pi.source, here);
         let ip_s = ip.map(|i| i.to_string()).unwrap_or_default();
         let filling = Filling {
@@ -265,11 +287,23 @@ impl Resolver for Tftp {
     async fn resolve(&self, req: &Request) -> Resolution {
         let Some(path) = req.path.clone() else { return Resolution::Denied("bad path".into()) };
         let ip = v4(req.peer.ip());
-        let (mut mac, fw) = self.identify(ip).await;
+        let (mac, fw) = self.identify(ip).await;
         let (prefix, file) = bootbob_pi::split_prefix(&path);
-        // A Pi asking under its MAC says who it is.
-        if let Some(Prefix::Mac(m)) = &prefix {
-            mac = Some(*m);
+        // A Pi asking under its MAC is only believed when the interface agrees: anything
+        // could ask for another Pi's files by naming it.
+        if let (Some(Prefix::Mac(m)), Some(known)) = (&prefix, mac)
+            && *m != known
+        {
+            self.st.event(
+                None,
+                "refused",
+                format!(
+                    "{} on {} asked for {path} as {m}, but it's {known}",
+                    ip.map(|i| i.to_string()).unwrap_or_default(),
+                    self.st.iface_label(&self.iface)
+                ),
+            );
+            return Resolution::NotFound;
         }
         let dir = &self.st.config.ipxe_dir;
 
@@ -303,14 +337,7 @@ impl Resolver for Tftp {
     }
 
     fn finished(&self, req: &Request, outcome: &Outcome) {
-        let mac = req
-            .path
-            .as_deref()
-            .and_then(|p| match bootbob_pi::split_prefix(p).0 {
-                Some(Prefix::Mac(m)) => Some(m),
-                _ => None,
-            })
-            .or_else(|| v4(req.peer.ip()).and_then(|ip| self.st.mac_for(ip)));
+        let mac = v4(req.peer.ip()).and_then(|ip| self.st.mac_for(&self.iface, ip));
         let Some(mac) = mac else { return };
         let ok = match outcome {
             Outcome::Completed { .. } => Some(true),

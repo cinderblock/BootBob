@@ -66,16 +66,19 @@ survives a reboot" enforced by the server, not only by the Pi's own mounts. Want
 (or per-assignment) "read-only" setting that exports the disk read-only and refuses writes.
 TFTP boot-file reads are unaffected.
 
-## Anything on the LAN can drive BootBob, and claim to be any machine
+## The control API has no authentication
 
-The HTTP API on `:8067` has no authentication: anything that can reach it can reassign what
-every machine boots, upload or delete disks, and reset overlays (Caddy's LAN-only check on
-`pxe.tsl` doesn't cover the bare `10.255.0.5:8067` that machines use). NBD and Pi TFTP decide
-who a client is from its IP-to-MAC mapping (`State::mac_for`, the DHCP listener or
-`/proc/net/arp`) or from a MAC prefix in the TFTP path, so a host that takes over a MAC/IP
-(or just asks with another Pi's MAC prefix) gets that machine's disk, read-write over NBD.
-It matters because a netbooted machine running untrusted code, such as the dfu-programmer
-hardware CI Pi, could take over desky or any PXE machine's next boot. That's why the CI Pi
-is going on its own VLAN. A related limitation: NBD can't identify a client on another
-subnet at all ("BootBob doesn't know which machine {ip} is"), so routed machines can only
-TFTP-boot (with `TFTP_PREFIX=2`).
+The web UI and API (`[control] http`) have no login: anything that can reach them can reassign
+what every machine boots, upload or delete disks, and reset overlays. Since multi-interface
+support (`plans/multi-interface.md`), they listen only where `[control] http` says, each listener
+bound to the interface holding its address, so a boot VLAN can't reach them. On the LAN they're
+still open to everything (Caddy's LAN-only check on `pxe.tsl` doesn't cover the bare
+`10.255.0.5:8067`, which machines on the LAN use to boot). It matters because any machine on the
+LAN, including a netbooted one running something untrusted, can change what others boot.
+
+Also still true within one network segment: MACs and addresses can be faked. BootBob now
+identifies a machine only from the interface it asked on (its DHCP listener and neighbour table),
+checks what it claims against that, and admits machines per boot interface, so the damage stays
+inside the segment. An untrusted machine belongs on a VLAN of its own. Routed machines (TFTP from
+another subnet) can't be identified at all, by design: give them a boot interface on their own
+network.

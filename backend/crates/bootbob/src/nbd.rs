@@ -6,6 +6,10 @@
 //! assignment, used up as the boot starts, still covers the root filesystem for the rest
 //! of that boot, and nobody else on the network can open someone's root disk.
 //!
+//! Each boot interface has its own NBD listener, and a machine is identified only from
+//! that interface's neighbour table. Where it isn't admitted, it gets only the disks of
+//! public images it chose at the menu.
+//!
 //! A Pi image marked copy-on-write hands each machine its own overlay of the disk
 //! (`<data_dir>/overlays/<mac>/<disk>.{ovl,map}`, see [`bootbob_cow`]); the image itself
 //! is then never written, so one golden image serves any number of Pis. Resetting a
@@ -22,8 +26,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::State;
 
+/// NBD on one boot interface.
 pub struct Nbd {
     pub st: Arc<State>,
+    pub iface: String,
 }
 
 /// Where a machine's overlays live.
@@ -45,40 +51,51 @@ struct Allowed {
 
 impl Nbd {
     fn mac(&self, peer: SocketAddr) -> Option<Mac> {
-        match peer.ip() {
-            IpAddr::V4(a) => self.st.mac_for(a),
-            IpAddr::V6(a) => a.to_ipv4_mapped().and_then(|a| self.st.mac_for(a)),
+        match peer.ip().to_canonical() {
+            IpAddr::V4(a) => self.st.mac_for(&self.iface, a),
+            IpAddr::V6(_) => None,
         }
     }
 
     /// The disk images this peer may use.
     fn allowed(&self, peer: SocketAddr) -> Result<(Mac, Vec<Allowed>), String> {
-        let ip = match peer.ip() {
-            IpAddr::V4(a) => a,
-            IpAddr::V6(a) => a.to_ipv4_mapped().ok_or("IPv6 clients aren't supported")?,
-        };
-        let mac = self.st.mac_for(ip).ok_or_else(|| format!("BootBob doesn't know which machine {ip} is"))?;
-        let dev = self.st.device(mac).ok_or_else(|| format!("{mac} has never netbooted from BootBob"))?;
-        // What it would boot now as a Pi or a PC, and what it is running.
-        let mut images: Vec<String> = self.st.resolve_pi(&dev).map(|r| r.image).into_iter().collect();
-        images.push(self.st.resolve(&dev).image);
-        images.extend(dev.last_boot.as_ref().map(|b| b.image.clone()));
-        images.sort();
-        images.dedup();
-        let mut disks: Vec<Allowed> = images
-            .iter()
-            .filter_map(|id| self.st.image(id))
-            .flat_map(|i| {
-                let pi = i.pi.map(|p| Allowed { source: p.source, cow: p.cow });
-                let pc = i.disk.map(|d| Allowed { source: d.source, cow: d.cow });
-                pi.into_iter().chain(pc)
-            })
-            .filter(|a| a.source.ends_with(".img"))
-            .collect();
-        disks.sort_by(|a, b| a.source.cmp(&b.source));
-        disks.dedup_by(|a, b| a.source == b.source);
-        Ok((mac, disks))
+        let IpAddr::V4(ip) = peer.ip().to_canonical() else { return Err("IPv6 clients aren't supported".into()) };
+        let mac = self
+            .st
+            .mac_for(&self.iface, ip)
+            .ok_or_else(|| format!("BootBob doesn't know which machine {ip} is on {}", self.st.iface_label(&self.iface)))?;
+        Ok((mac, allowed_for(&self.st, &self.iface, mac)?))
     }
+}
+
+/// The disk images machine `mac` may use on boot interface `iface`: those of what it would
+/// boot now as a Pi or a PC, and of what it's running. Where it isn't admitted, only a
+/// public image it's running (chosen at the menu).
+fn allowed_for(st: &State, iface: &str, mac: Mac) -> Result<Vec<Allowed>, String> {
+    let dev = st.device(mac).ok_or_else(|| format!("{mac} has never netbooted from BootBob"))?;
+    let admitted = dev.is_admitted(iface);
+    let mut images: Vec<String> = Vec::new();
+    if admitted {
+        images.extend(st.resolve_pi(&dev).map(|r| r.image));
+        images.push(st.resolve(&dev).image);
+    }
+    images.extend(dev.last_boot.as_ref().map(|b| b.image.clone()));
+    images.sort();
+    images.dedup();
+    let mut disks: Vec<Allowed> = images
+        .iter()
+        .filter_map(|id| st.image(id))
+        .filter(|i| admitted || i.public)
+        .flat_map(|i| {
+            let pi = i.pi.map(|p| Allowed { source: p.source, cow: p.cow });
+            let pc = i.disk.map(|d| Allowed { source: d.source, cow: d.cow });
+            pi.into_iter().chain(pc)
+        })
+        .filter(|a| a.source.ends_with(".img"))
+        .collect();
+    disks.sort_by(|a, b| a.source.cmp(&b.source));
+    disks.dedup_by(|a, b| a.source == b.source);
+    Ok(disks)
 }
 
 impl Exports for Nbd {
@@ -230,10 +247,11 @@ pub fn delete_disk(st: &State, name: &str) -> Result<(), (u16, String)> {
 
 /// The main server's answer to store `store` asking whether `ip` may open its disk
 /// `export`: allowed if `<store>:<export>` is the disk of an image the machine is
-/// assigned or running.
+/// assigned or running, on the boot interface it's on. The store's question carries no
+/// interface, so the address has to belong to exactly one boot interface here.
 pub fn allow_for_store(st: &Arc<State>, store: &str, ip: std::net::Ipv4Addr, export: &str) -> Result<crate::stores::Allow, String> {
-    let nbd = Nbd { st: st.clone() };
-    let (mac, disks) = nbd.allowed(SocketAddr::from((ip, 0)))?;
+    let (iface, mac) = st.identify_ip(ip).ok_or_else(|| format!("BootBob doesn't know which machine {ip} is"))?;
+    let disks = allowed_for(st, &iface, mac)?;
     let want = format!("{store}:{export}");
     let d = disks.iter().find(|d| d.source == want).ok_or_else(|| format!("{want} isn't the disk of an image assigned to this machine"))?;
     Ok(crate::stores::Allow { mac: crate::stores::dashed(mac), cow: d.cow })

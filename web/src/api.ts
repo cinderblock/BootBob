@@ -66,11 +66,22 @@ export interface Device {
   check: { at: Millis; health: string; busy: string } | null;
   /** Being moved between versions of its track. */
   moving: { track: string; from: string; to: string; started: Millis; back: boolean } | null;
+  /** The boot interfaces it's admitted to. Anywhere else it's held at the menu with public images only. */
+  admitted: string[];
+  /** Where it has been seen, by boot interface. */
+  seen: Record<string, Sighting>;
   // Computed by the server:
   code: string;
   state: "fetching" | "at_menu" | "menu_idle" | "pi_waiting" | "stuck" | "booted" | "seen";
   summary: string;
   next: { image: string; title: string; reason: string };
+}
+
+/** A machine seen on one boot interface. */
+export interface Sighting {
+  at: Millis;
+  ip: string | null;
+  vlan: number | null;
 }
 
 export interface Image {
@@ -80,6 +91,8 @@ export interface Image {
   action: Action | null;
   pi: PiBoot | null;
   disk: DiskBoot | null;
+  /** Machines that aren't admitted may boot it too. */
+  public: boolean;
   builtin: boolean;
 }
 
@@ -185,20 +198,37 @@ export interface BootEvent {
   message: string;
 }
 
+export interface Listener {
+  interface: string;
+  running: boolean;
+  error: string | null;
+  dhcp_seen: number;
+  pxe_seen: number;
+  last_seen: Millis | null;
+}
+
+export type Service = "listen" | "tftp" | "http" | "nbd";
+
+/** One interface machines netboot on. */
+export interface BootInterface {
+  interface: string;
+  label: string;
+  vlan: number | null;
+  parent: string | null;
+  /** Null: the interface isn't up with an address yet. */
+  address: string | null;
+  url: string | null;
+  services: Service[];
+  listener: Listener | null;
+  admitted: number;
+}
+
 export interface Status {
   version: string;
   boot_filename: string;
-  tftp: string | null;
-  http: string;
-  public_url: string | null;
-  listener: {
-    interface: string | null;
-    running: boolean;
-    error: string | null;
-    dhcp_seen: number;
-    pxe_seen: number;
-    last_seen: Millis | null;
-  };
+  /** Where the UI and API listen. */
+  control: string[];
+  interfaces: BootInterface[];
   ipxe_builds: string[];
   devices: number;
 }
@@ -229,6 +259,8 @@ export const api = {
   forgetDevice: (mac: string) => call<void>("DELETE", `/api/devices/${mac}`),
   assign: (mac: string, a: Assignment) => call<Device>("PUT", `/api/devices/${mac}/assignment`, a),
   unassign: (mac: string) => call<Device>("DELETE", `/api/devices/${mac}/assignment`),
+  admit: (mac: string, iface: string, admitted: boolean) =>
+    call<Device>(admitted ? "PUT" : "DELETE", `/api/devices/${mac}/admitted/${encodeURIComponent(iface)}`),
   images: () => call<Image[]>("GET", "/api/images"),
   putImage: (img: Omit<Image, "builtin">) => call<Image>("PUT", `/api/images/${encodeURIComponent(img.id)}`, img),
   deleteImage: (id: string) => call<void>("DELETE", `/api/images/${encodeURIComponent(id)}`),

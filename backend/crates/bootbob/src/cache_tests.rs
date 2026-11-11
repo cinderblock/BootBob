@@ -621,7 +621,7 @@ async fn a_pc_waits_at_the_menu_then_boots_what_arrived() {
 
     // What iPXE fetches, with a Range an ISO boot would use.
     let req = Request::builder().uri("/files/cache/linux").header("range", "bytes=10-19").body(Body::empty()).unwrap();
-    let res = crate::http::router(t.st.clone()).oneshot(req).await.unwrap();
+    let res = router(t.st.clone()).oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(res.into_body().collect().await.unwrap().to_bytes(), kernel[10..20]);
 
@@ -671,6 +671,7 @@ async fn something_chosen_at_the_menu_waits_for_that_choice() {
     let img = json!({"title": "Memtest", "group": "Tools", "action": {"kind": "chain", "url": "{cached:memtest}"}});
     call(&t.st, Method::PUT, "/api/images/memtest", Some(img)).await;
     let chose = ident("&item=memtest").replace("/boot/ipxe?", "/boot/ipxe/chose?");
+    call(&t.st, Method::PUT, &format!("/api/devices/{MAC}/admitted/{IF}"), None).await;
     get(&t.st, &ident("")).await;
 
     let script = get(&t.st, &chose).await;
@@ -715,9 +716,9 @@ async fn a_pi_is_told_no_until_its_image_is_here() {
     let mac = "dc:a6:32:01:02:03";
     let (s, body) = call(&t.st, Method::PUT, &format!("/api/devices/{mac}/assignment"), Some(json!({"image": "pios", "once": true}))).await;
     assert_eq!(s, StatusCode::OK, "{body}");
-    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    let tftp = crate::tftp::Tftp { st: t.st.clone(), iface: IF.into() };
     let ip = [10, 255, 7, 77];
-    t.st.learn_address(Ipv4Addr::from(ip), mac.parse().unwrap());
+    t.st.learn_address(IF, Ipv4Addr::from(ip), mac.parse().unwrap());
 
     for _ in 0..3 {
         assert!(pi_file(&tftp, ip, "6a6f4d1d/start4.elf").await.is_none(), "told no");
@@ -886,7 +887,7 @@ async fn a_store_fetches_for_itself_and_machines_go_to_it() {
     assert!(script.contains("nbdroot=10.255.0.3,golden.img,nbd0"), "{script}");
     assert!(!t.st.config.images_dir().join("golden.img").exists(), "on the store, not here");
     assert!(p.store.config.images_dir().join("golden.img").is_file());
-    assert_eq!(get(&t.st, "/boot/disk/g/vmlinuz").await, "STORE-KERNEL");
+    assert_eq!(get(&t.st, "/boot/disk/g/vmlinuz?mac=52-54-00-12-34-56").await, "STORE-KERNEL");
 
     // A file on a store is fetched straight from the store.
     call(&t.st, Method::PUT, &format!("/api/devices/{MAC}/assignment"), Some(json!({"image": "k"}))).await;

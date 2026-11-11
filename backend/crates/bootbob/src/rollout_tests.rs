@@ -213,8 +213,8 @@ async fn one_machine_at_a_time_and_each_keeps_what_it_had() {
     use bootbob_nbd::Exports;
     let t = fleet().await;
     let ip = Ipv4Addr::new(10, 255, 7, 77);
-    t.st.learn_address(ip, mac(A));
-    let nbd = crate::nbd::Nbd { st: t.st.clone() };
+    t.st.learn_address(IF, ip, mac(A));
+    let nbd = crate::nbd::Nbd { st: t.st.clone(), iface: IF.into() };
     let peer = SocketAddr::from((ip, 40000));
 
     // What A has written on version 1.
@@ -529,7 +529,7 @@ async fn a_version_is_a_new_disk_that_a_machine_can_boot() {
 #[tokio::test]
 async fn a_rollout_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let config = Config { data_dir: dir.path().join("data"), ..Config::default() };
+    let config = Config { data_dir: dir.path().join("data"), boot: boot(), ..Config::default() };
     let st = Arc::new(State::open(config.clone()).unwrap());
     std::fs::create_dir_all(config.images_dir()).unwrap();
     let t = T { st, _dir: dir };
@@ -548,8 +548,8 @@ async fn a_rollout_survives_a_restart() {
 #[tokio::test]
 async fn pis_get_the_disk_and_the_way_home_in_their_command_line() {
     let t = setup();
-    let tftp = crate::tftp::Tftp { st: t.st.clone() };
-    t.st.learn_address(Ipv4Addr::from(PI_IP), PI.parse().unwrap());
+    let tftp = crate::tftp::Tftp { st: t.st.clone(), iface: IF.into() };
+    t.st.learn_address(IF, Ipv4Addr::from(PI_IP), PI.parse().unwrap());
     pc_disk(&t, "golden-1.img");
     let pi = json!({"source": "golden-1.img", "cow": true, "cmdline": "nbdroot={server},{disk},nbd0 bootbob.url={bootbob}"});
     let (s, body) = put_pi_image(&t, "golden-1", pi).await;

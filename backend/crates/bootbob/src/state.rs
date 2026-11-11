@@ -41,10 +41,10 @@ pub struct Resolved {
     pub once: bool,
 }
 
-/// The DHCP listener's state, for the UI and the network check.
+/// One DHCP listener's state, for the UI and the network check.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListenerStatus {
-    pub interface: Option<String>,
+    pub interface: String,
     pub running: bool,
     pub error: Option<String>,
     pub dhcp_seen: u64,
@@ -64,9 +64,14 @@ pub struct State {
     /// quiet DHCP server, so the rollout window doesn't jump to UTC.
     network_zone: RwLock<Option<String>>,
     events: Mutex<VecDeque<Event>>,
-    /// IP → MAC, learnt from DHCP replies and TFTP request frames.
-    addresses: Mutex<HashMap<Ipv4Addr, (Mac, Millis)>>,
-    pub listener: RwLock<ListenerStatus>,
+    /// (boot interface, IP) → MAC, learnt from DHCP replies and TFTP request frames on that
+    /// interface. Kept apart per interface, so a claim made on one never identifies a machine
+    /// on another.
+    addresses: Mutex<HashMap<(String, Ipv4Addr), (Mac, Millis)>>,
+    /// The DHCP listeners, by boot interface.
+    pub listeners: RwLock<BTreeMap<String, ListenerStatus>>,
+    /// The host's interfaces as last read (addresses, VLANs).
+    netifs: RwLock<Vec<crate::netif::NetIf>>,
     /// The doctor's probes in flight, by DHCP transaction id, with the offers they got.
     probes: Mutex<HashMap<u32, Vec<crate::doctor::Offer>>>,
     report: Mutex<Option<crate::doctor::Report>>,
@@ -87,7 +92,19 @@ impl State {
             tracing::warn!("can't create the images directory {}: {e}", config.images_dir().display());
         }
         let store = Store::open(&config.data_dir.join("bootbob.redb"))?;
-        let devices = store.all::<Device>(Table::Devices)?.into_iter().filter_map(|d| Some((d.mac.parse::<Mac>().ok()?, d))).collect();
+        let mut devices: BTreeMap<Mac, Device> =
+            store.all::<Device>(Table::Devices)?.into_iter().filter_map(|d| Some((d.mac.parse::<Mac>().ok()?, d))).collect();
+        // Machines known from before admission existed keep booting where they always did:
+        // they're admitted to the first boot interface (the LAN), and nowhere new.
+        if store.get::<bool>(Table::Meta, "admission")?.is_none()
+            && let Some(first) = config.boot.first()
+        {
+            for d in devices.values_mut().filter(|d| d.admitted.is_empty()) {
+                d.admitted.push(first.interface.clone());
+                store.put(Table::Devices, &d.mac, d)?;
+            }
+            store.put(Table::Meta, "admission", &true)?;
+        }
         let mut images: BTreeMap<String, Image> = store.all::<Image>(Table::Images)?.into_iter().map(|i| (i.id.clone(), i)).collect();
         for b in builtin_images() {
             images.insert(b.id.clone(), b);
@@ -99,7 +116,15 @@ impl State {
         let events = store.recent_events::<Event>(EVENTS_IN_MEMORY)?.into();
         let (changes, _) = broadcast::channel(256);
         Ok(State {
-            listener: RwLock::new(ListenerStatus { interface: config.interface.clone(), ..Default::default() }),
+            listeners: RwLock::new(
+                config
+                    .boot
+                    .iter()
+                    .filter(|b| b.serves(crate::config::Service::Listen))
+                    .map(|b| (b.interface.clone(), ListenerStatus { interface: b.interface.clone(), ..Default::default() }))
+                    .collect(),
+            ),
+            netifs: RwLock::new(crate::netif::discover()),
             config,
             store,
             devices: RwLock::new(devices),
@@ -188,7 +213,24 @@ impl State {
             Some(a) => format!("{} {}", if a.once { "Next boot only:" } else { "Assigned" }, self.image_title(&a.image)),
             None => "Assignment cleared".to_string(),
         };
+        // Saying what a machine boots admits it, where it was seen last (or, never seen, on
+        // the first boot interface): a person has just vouched for it.
+        let admit = assignment.as_ref().and_then(|_| {
+            let seen = self.device(mac).and_then(|d| d.last_seen_on().map(String::from));
+            seen.or_else(|| self.config.boot.first().map(|b| b.interface.clone()))
+        });
+        if let Some(i) = &admit
+            && !self.device(mac).is_some_and(|d| d.is_admitted(i))
+        {
+            self.event(Some(mac), "admitted", format!("Admitted on {}", self.iface_label(i)));
+        }
         let (dev, _) = self.update_device(mac, |d| {
+            if let Some(i) = admit
+                && !d.is_admitted(&i)
+            {
+                d.admitted.push(i);
+                d.admitted.sort();
+            }
             d.assignment = assignment.map(|a| Assignment { set_at: now_ms(), ..a });
             // A person just said what this machine boots, so a move in flight is over.
             d.moving = None;
@@ -629,6 +671,103 @@ impl State {
         }
     }
 
+    // ---- Boot interfaces and admission ----
+
+    /// Re-reads the host's interfaces (addresses, VLANs).
+    pub fn refresh_netifs(&self) {
+        *self.netifs.write().unwrap() = crate::netif::discover();
+    }
+
+    pub fn netif(&self, name: &str) -> Option<crate::netif::NetIf> {
+        self.netifs.read().unwrap().iter().find(|i| i.name == name).cloned()
+    }
+
+    /// A boot interface's VLAN, if it's a VLAN subinterface.
+    pub fn vlan_of(&self, iface: &str) -> Option<u16> {
+        self.netif(iface).and_then(|i| i.vlan)
+    }
+
+    /// What the UI and the log call a boot interface: its label, and its VLAN.
+    pub fn iface_label(&self, iface: &str) -> String {
+        let label = self.config.boot_iface(iface).map(|b| b.label().to_string()).unwrap_or_else(|| iface.to_string());
+        match self.vlan_of(iface) {
+            Some(v) => format!("{label} (VLAN {v})"),
+            None => label,
+        }
+    }
+
+    /// The address a boot interface serves on: the configured one, else the interface's own.
+    pub fn boot_address(&self, iface: &str) -> Option<Ipv4Addr> {
+        let b = self.config.boot_iface(iface)?;
+        b.address.or_else(|| self.netif(iface)?.address())
+    }
+
+    /// The URL machines on a boot interface fetch from (`{bootbob}`).
+    pub fn boot_url(&self, iface: &str) -> Option<String> {
+        let b = self.config.boot_iface(iface)?;
+        match &b.url {
+            Some(u) => Some(u.trim_end_matches('/').to_string()),
+            None => Some(format!("http://{}:{}", self.boot_address(iface)?, b.http_port)),
+        }
+    }
+
+    /// Admits a machine to a boot interface, or takes that away.
+    pub fn set_admitted(&self, mac: Mac, iface: &str, admitted: bool) -> Result<Device, String> {
+        if self.config.boot_iface(iface).is_none() {
+            return Err(format!("no boot interface {iface:?}"));
+        }
+        let was = self.device(mac).is_some_and(|d| d.is_admitted(iface));
+        let (dev, _) = self.update_device(mac, |d| {
+            d.admitted.retain(|a| a != iface);
+            if admitted {
+                d.admitted.push(iface.to_string());
+                d.admitted.sort();
+            }
+        });
+        if was != admitted {
+            let label = self.iface_label(iface);
+            self.event(
+                Some(mac),
+                "admitted",
+                if admitted { format!("Admitted on {label}") } else { format!("No longer admitted on {label}") },
+            );
+        }
+        Ok(dev)
+    }
+
+    /// Records that a machine was seen on a boot interface, at `ip`. Its address is only
+    /// believed where it's admitted: a machine claiming its MAC elsewhere doesn't move it.
+    /// Logs a machine admitted elsewhere turning up where it isn't (once per visit): that's
+    /// either a machine that moved, or something claiming its MAC.
+    pub fn note_sighting(&self, mac: Mac, iface: &str, ip: Option<Ipv4Addr>) {
+        let now = now_ms();
+        let vlan = self.vlan_of(iface);
+        let before = self.device(mac);
+        let (dev, _) = self.update_device(mac, |d| {
+            d.last_seen = now;
+            let s = d.seen.entry(iface.to_string()).or_default();
+            s.at = now;
+            s.vlan = vlan;
+            if let Some(ip) = ip {
+                s.ip = Some(ip.to_string());
+            }
+            if let Some(ip) = ip
+                && d.speaks_for(iface)
+            {
+                d.ip = Some(ip.to_string());
+            }
+        });
+        let quiet_for = before.as_ref().and_then(|d| d.seen.get(iface)).map(|s| now.saturating_sub(s.at));
+        if !dev.admitted.is_empty() && !dev.is_admitted(iface) && quiet_for.is_none_or(|q| q >= PI_SESSION_GAP_MS) {
+            let elsewhere = dev.admitted.iter().map(|a| self.iface_label(a)).collect::<Vec<_>>().join(", ");
+            self.event(
+                Some(mac),
+                "unadmitted",
+                format!("Seen on {}, where it isn't admitted (it's admitted on {elsewhere}): public images only", self.iface_label(iface)),
+            );
+        }
+    }
+
     // ---- The doctor ----
 
     pub fn expect_probe(&self, xid: u32) {
@@ -649,31 +788,42 @@ impl State {
 
     // ---- Addresses ----
 
-    pub fn learn_address(&self, ip: Ipv4Addr, mac: Mac) {
+    pub fn learn_address(&self, iface: &str, ip: Ipv4Addr, mac: Mac) {
         if ip.is_unspecified() || ip.is_broadcast() {
             return;
         }
-        self.addresses.lock().unwrap().insert(ip, (mac, now_ms()));
+        self.addresses.lock().unwrap().insert((iface.to_string(), ip), (mac, now_ms()));
     }
 
-    /// The MAC behind an IP: what the listener learnt, else the kernel's neighbour table.
-    pub fn mac_for(&self, ip: Ipv4Addr) -> Option<Mac> {
-        if let Some((m, _)) = self.addresses.lock().unwrap().get(&ip) {
+    /// The MAC behind an IP on one boot interface: what its listener learnt, else the
+    /// kernel's neighbour table for that interface. Never what was learnt on another.
+    pub fn mac_for(&self, iface: &str, ip: Ipv4Addr) -> Option<Mac> {
+        if let Some((m, _)) = self.addresses.lock().unwrap().get(&(iface.to_string(), ip)) {
             return Some(*m);
         }
-        bootbob_dhcp::neigh::lookup(ip)
+        bootbob_dhcp::neigh::lookup_on(iface, ip)
     }
 
-    /// The firmware of whatever is at `ip`, as best we know.
-    pub fn firmware_for(&self, ip: Ipv4Addr) -> (Option<Mac>, Option<Firmware>) {
-        let mac = self.mac_for(ip);
+    /// Which boot interface and machine an IP belongs to, for a question that comes without
+    /// an interface (an image store asking about one of its NBD clients). Only when exactly
+    /// one boot interface knows it.
+    pub fn identify_ip(&self, ip: Ipv4Addr) -> Option<(String, Mac)> {
+        let mut found = self.config.boot.iter().filter_map(|b| Some((b.interface.clone(), self.mac_for(&b.interface, ip)?)));
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    }
+
+    /// The firmware of whatever is at `ip` on `iface`, as best we know.
+    pub fn firmware_for(&self, iface: &str, ip: Ipv4Addr) -> (Option<Mac>, Option<Firmware>) {
+        let mac = self.mac_for(iface, ip);
         let fw = mac.and_then(|m| self.device(m)).and_then(|d| d.firmware).and_then(|s| Firmware::from_slug(&s));
         (mac, fw)
     }
 
     // ---- The DHCP listener ----
 
-    pub fn observe(&self, seen: Seen) {
+    /// What the DHCP listener on boot interface `iface` saw.
+    pub fn observe(&self, iface: &str, seen: Seen) {
         let now = now_ms();
         match &seen {
             Seen::Dhcp { src_mac, src_ip, from_server, msg, .. } => tracing::debug!(
@@ -684,14 +834,18 @@ impl State {
         }
         match seen {
             Seen::Dhcp { src_mac, from_server, msg, .. } => {
-                {
-                    let mut l = self.listener.write().unwrap();
+                if let Some(l) = self.listeners.write().unwrap().get_mut(iface) {
                     l.dhcp_seen += 1;
                     l.last_seen = Some(now);
                 }
                 // A reply to one of the doctor's probes: hand it over, and don't treat the
-                // probe's made-up MAC as a machine.
-                if from_server && let Some(offers) = self.probes.lock().unwrap().get_mut(&msg.xid) {
+                // probe's made-up MAC as a machine. Probes go out only on the control network,
+                // so only answers heard there count: a forged one on a boot VLAN can't set the
+                // time zone.
+                if from_server
+                    && self.config.control.network.as_deref() == Some(iface)
+                    && let Some(offers) = self.probes.lock().unwrap().get_mut(&msg.xid)
+                {
                     offers.push(crate::doctor::Offer {
                         server: msg.server_id(),
                         src_mac,
@@ -706,12 +860,12 @@ impl State {
                     if !matches!(msg.msg_type(), Some(MessageType::Offer | MessageType::Ack)) {
                         return;
                     }
-                    self.learn_address(msg.yiaddr, client);
+                    self.learn_address(iface, msg.yiaddr, client);
                     // Only machines we already know as netbooters get the offer recorded;
                     // this isn't a DHCP log of every phone on the network.
                     if self.device(client).is_some() {
                         self.update_device(client, |d| {
-                            if !msg.yiaddr.is_unspecified() {
+                            if !msg.yiaddr.is_unspecified() && d.speaks_for(iface) {
                                 d.ip = Some(msg.yiaddr.to_string());
                             }
                             d.dhcp.get_or_insert_with(Default::default).offer = Some(OfferSeen {
@@ -728,12 +882,21 @@ impl State {
                 if !msg.is_pxe() || !matches!(msg.msg_type(), Some(MessageType::Discover | MessageType::Request)) {
                     return;
                 }
-                self.listener.write().unwrap().pxe_seen += 1;
+                if let Some(l) = self.listeners.write().unwrap().get_mut(iface) {
+                    l.pxe_seen += 1;
+                }
                 let arches = msg.arches();
                 let fw = arches.first().map(|&a| Firmware::from_arch(a));
                 let is_new = self.device(client).is_none();
+                let vlan = self.vlan_of(iface);
                 let (_, _) = self.update_device(client, |d| {
                     d.last_seen = now;
+                    let s = d.seen.entry(iface.to_string()).or_default();
+                    s.at = now;
+                    s.vlan = vlan;
+                    if !d.speaks_for(iface) {
+                        return;
+                    }
                     if let Some((f, http)) = fw
                         // iPXE re-sends the firmware's arch; the firmware's own is the truth,
                         // but either is fine. A Pi claims BIOS; its MAC says otherwise.
@@ -752,11 +915,11 @@ impl State {
                     dh.ipxe = msg.is_ipxe();
                 });
                 if !is_new && msg.msg_type() == Some(MessageType::Discover) && !msg.is_ipxe() {
-                    self.event(Some(client), "netboot", "Started a network boot (DHCP)".into());
+                    self.event(Some(client), "netboot", format!("Started a network boot (DHCP) on {}", self.iface_label(iface)));
                 }
             }
             Seen::TftpRequest { src_mac, src_ip, .. } => {
-                self.learn_address(src_ip, src_mac);
+                self.learn_address(iface, src_ip, src_mac);
             }
         }
     }

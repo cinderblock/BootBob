@@ -31,6 +31,36 @@ but never got as far as BootBob.
 From there, iPXE fetches a script from BootBob over HTTP: either the image the machine is
 assigned, or the fallback menu.
 
+## Several networks, VLANs, and which machines may boot
+
+BootBob serves boots on any number of interfaces at once, such as the LAN's `eno1` and a
+tagged VLAN subinterface `eno1.5`. Each is a `[[boot]]` section in the config. BootBob
+never changes the host's networking: the host makes the interfaces (netplan,
+systemd-networkd), and BootBob finds each one's address and VLAN (from
+`/proc/net/vlan/config`). The web UI groups machines by where they were seen
+("VLAN 5 · Hardware CI").
+
+The **control plane** (the web UI and the management API) is a separate `[control]`
+section, and never runs on a boot interface unless you list that address there too. So a
+VLAN for untrusted machines can boot from BootBob without reaching the API.
+
+**Machines are admitted per boot interface.** A machine BootBob hasn't been told about is
+held at the fallback menu, which lists only **public** images (a flag on each image; the
+built-in menu items are public). Someone at its keyboard can pick one of those, or an admin
+admits it in the web UI. Assigning a machine an image admits it where it was seen last. A
+Raspberry Pi can't show a menu, so one that isn't admitted gets nothing and shows as
+waiting. A machine admitted only on `eno1` that turns up on `eno1.5` is treated as a
+stranger there, and the log says so.
+
+**Who a machine is** comes only from the interface it asked on: that interface's DHCP
+listener and the kernel's neighbour table for it. What a machine says about itself (the
+`mac=` iPXE sends, a Pi's MAC path prefix) is only checked against that, so nothing on the
+CI VLAN can get desky's disk by naming desky. Every socket is bound to its interface
+(`SO_BINDTODEVICE`), not only its address: Linux accepts a packet for any of its addresses
+on any interface, so an address alone wouldn't keep a VLAN out. MACs and addresses can
+still be faked *within* one network segment, which is why an untrusted machine belongs on a
+VLAN of its own.
+
 ## The fallback menu
 
 - Check for an assignment now (the default, every 10 s until someone presses a key;
@@ -62,15 +92,16 @@ serves them from the **Pi image** assigned to it (or the Pi default in Settings)
 
 ### Network roots (NBD)
 
-With `nbd = "<address>:10809"` in the config, BootBob also serves disk images as network
-block devices, so a Pi can run with no SD card at all. Make one disk image hold the whole
+BootBob also serves disk images as network block devices (NBD, on each boot interface
+that lists `nbd` in its `services`, the default), so a Pi can run with no SD card at all. Make one disk image hold the whole
 system (a FAT boot partition and the root filesystem), and use it as the Pi image's boot
 files too: TFTP reads the kernel out of it, and the initramfs mounts its root over NBD
 with `nbd-client` (`root=/dev/nbd0p2 nbdroot=<server>,<disk>.img,nbd0 ip=dhcp`). Kernel
 updates the Pi installs land in the same image, so the next boot uses them.
 
 A disk image is exported only to the machine assigned the Pi image it belongs to (or the
-one running it now). `POST /api/disks` creates an empty one to fill over NBD.
+one running it now), on a boot interface it's admitted to; elsewhere, only a public image's
+disk it chose at the menu. `POST /api/disks` creates an empty one to fill over NBD.
 
 **Surviving a BootBob restart.** Debian's `nbd-client` sets the device up and exits, so
 when BootBob restarts (an upgrade, a reboot of its host) nothing reconnects: in-flight
@@ -294,7 +325,7 @@ written into it. A UEFI PC booted from it reaches BootBob even on a network whos
 gives no boot options. Write it to any USB stick (`dd`, Raspberry Pi Imager, BenchBob).
 
 BootBob also announces itself over mDNS as `_bootbob._tcp` on the LAN interface (the
-`interface` in the config; `mdns = false` turns it off), with TXT records `url`,
+`[control] network` in the config; `mdns = false` there turns it off), with TXT records `url`,
 `version` and `caps`. BenchBob uses that to offer boot sticks and Pi netboot EEPROM cards
 for the BootBob on its network.
 
@@ -306,20 +337,38 @@ docker run --network host --cap-add NET_RAW \
   -v bootbob:/var/lib/bootbob -v ./bootbob.toml:/etc/bootbob/bootbob.toml:ro bootbob
 ```
 
-Then open `http://<server>:8067/`. A minimal `bootbob.toml`:
+Then open `http://<server>:8067/`. A `bootbob.toml` for a LAN and one VLAN:
 
 ```toml
 data_dir = "/var/lib/bootbob"
 ipxe_dir = "/usr/share/bootbob/ipxe"
 web_dir = "/usr/share/bootbob/web"
-http = "10.255.0.5:8067"   # listen on the LAN address only
-tftp = "10.255.0.5:69"
-nbd = "10.255.0.5:10809"   # network roots; leave out to turn it off
-interface = "eno1"         # the DHCP listener; leave out to turn it off
+
+# The web UI and the API: the LAN address, and loopback for a reverse proxy on this host.
+[control]
+http = ["10.255.0.5:8067", "127.0.0.1:8067"]
+network = "eno1"           # the LAN: the network check, its time zone, mDNS
+
+# Machines netboot on the LAN: the DHCP listener, TFTP (:69), HTTP (:8067) and NBD
+# (:10809) on eno1's address. The control plane shares 10.255.0.5:8067.
+[[boot]]
+interface = "eno1"
+label = "TSL LAN"
+
+# And on VLAN 5, which the host has made as eno1.5. No listener, no UI.
+[[boot]]
+interface = "eno1.5"
+label = "Hardware CI"
+services = ["tftp", "http", "nbd"]
+# url = "http://10.5.0.5:8067"   # what machines here fetch from; default: its address
 ```
 
-Every setting is optional; see [`config.rs`](backend/crates/bootbob/src/config.rs).
-Without a config, BootBob serves HTTP on `:8067` and TFTP on `:69` from `./data` and `./ipxe`.
+Paths are optional; see [`config.rs`](backend/crates/bootbob/src/config.rs). Without a
+`[[boot]]` section nothing netboots; without a config, the UI and API are on `:8067` from
+`./data` and `./ipxe`. A boot interface the host hasn't brought up yet is waited for. The
+config before boot interfaces (`interface`, `tftp`, `public_url`, top-level `http`, `nbd`
+and `mdns`) is refused with a message saying what replaces each. Machines already known
+when upgrading are admitted on the first `[[boot]]` interface.
 
 ## Layout
 
@@ -329,7 +378,7 @@ Without a config, BootBob serves HTTP on `:8067` and TFTP on `:69` from `./data`
 | `web/` | The web UI: Preact (via preact/compat), Vite, TypeScript, Bun |
 | `ipxe/` | iPXE build: pinned commit, embedded script, build options |
 | `e2e/` | End-to-end test: SeaBIOS and OVMF VMs netboot from BootBob in QEMU |
-| `tools/` | `pi-clone-to-nbd.sh`: clone a running Pi onto a BootBob NBD disk, to run it diskless. `make-pc-golden.sh`: build a Debian disk image a PC runs from over the network (root logs in with the keys given at build time; the same packages as the Pi base below, and no cron). CI runs a real rollout on it (`test-rollout.sh`). `make-pi-golden.sh`: the same for Raspberry Pis, from packages: Debian trixie with Raspberry Pi's kernels and firmware, the user `pi` (SSH keys from the boot partition, sudo without a password), wpasupplicant, rsync, curl, git, htop, btop, python3-venv, build-essential, avahi-daemon and libnss-mdns, and no cron (systemd timers instead). CI builds it, boots it in a VM with `test-pi-golden.sh`, and keeps it as an artifact. `make-pios-golden.sh`: the official Raspberry Pi OS Lite image, changed only as a network root needs, for machines that want Pi OS itself (CI builds and tests it the same way, with `test-pios-golden.sh`). `test-trim.sh`: proves TRIM on a real kernel, in a throwaway container |
+| `tools/` | `pi-clone-to-nbd.sh`: clone a running Pi onto a BootBob NBD disk, to run it diskless. `make-pc-golden.sh`: build a Debian disk image a PC runs from over the network (root logs in with the keys given at build time; the same packages as the Pi base below, and no cron). CI runs a real rollout on it (`test-rollout.sh`). `make-pi-golden.sh`: the same for Raspberry Pis, from packages: Debian trixie with Raspberry Pi's kernels and firmware, the user `pi` (SSH keys from the boot partition, sudo without a password), wpasupplicant, rsync, curl, git, htop, btop, python3-venv, build-essential, avahi-daemon and libnss-mdns, and no cron (systemd timers instead). CI builds it, boots it in a VM with `test-pi-golden.sh`, and keeps it as an artifact. `make-pios-golden.sh`: the official Raspberry Pi OS Lite image, changed only as a network root needs, for machines that want Pi OS itself (CI builds and tests it the same way, with `test-pios-golden.sh`). `test-trim.sh`: proves TRIM on a real kernel, in a throwaway container. `test-weak-host.sh`: shows why each boot interface's sockets are bound to the interface, in a throwaway network namespace |
 
 ## Development
 
@@ -351,12 +400,13 @@ runs it on every PC golden image (`.github/workflows/pc-golden.yml`).
 
 | Method and path | What |
 | --- | --- |
-| `GET /api/status` | Version, TFTP/listener state, iPXE builds found |
+| `GET /api/status` | Version, the control listeners, each boot interface (VLAN, address, services, listener), iPXE builds found |
 | `GET /api/devices`, `GET /api/devices/{mac}` | Machines, with their state and what they'd boot next |
 | `PATCH /api/devices/{mac}` | `{"name": …, "notes": …}` |
-| `PUT /api/devices/{mac}/assignment` | `{"image": "debian", "once": true}` |
+| `PUT /api/devices/{mac}/assignment` | `{"image": "debian", "once": true}`; also admits it where it was seen last |
+| `PUT/DELETE /api/devices/{mac}/admitted/{interface}` | Admit a machine on a boot interface, or stop |
 | `DELETE /api/devices/{mac}/assignment` | Back to the default |
-| `GET /api/images`, `PUT/DELETE /api/images/{id}` | The catalogue: for PCs an iPXE `action` (kernel, chain or script) or a `disk` image; for Pis a boot tree (`pi`); or one of each |
+| `GET /api/images`, `PUT/DELETE /api/images/{id}` | The catalogue: for PCs an iPXE `action` (kernel, chain or script) or a `disk` image; for Pis a boot tree (`pi`); or one of each. `public`: machines that aren't admitted may boot it |
 | `GET /api/devices/{mac}/overlays` | A machine's copy-on-write overlays: image, bytes written, in use |
 | `DELETE /api/devices/{mac}/overlays/{image}` | Reset one: back on the pristine image at the next boot (409 while in use) |
 | `PUT /api/disks/{name}.img` | Upload a disk image (the request body; zstd compressed with `Content-Encoding: zstd`) |

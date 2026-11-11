@@ -26,10 +26,16 @@ pub fn parse_proc_arp(text: &str) -> Vec<(Ipv4Addr, Mac, String)> {
         .collect()
 }
 
-/// Looks up an IP in the kernel's table. Always `None` off Linux.
-pub fn lookup(ip: Ipv4Addr) -> Option<Mac> {
+/// Looks up an IP in the kernel's table for one interface: an entry learnt on another
+/// interface doesn't count. Always `None` off Linux.
+pub fn lookup_on(interface: &str, ip: Ipv4Addr) -> Option<Mac> {
     let text = std::fs::read_to_string("/proc/net/arp").ok()?;
-    parse_proc_arp(&text).into_iter().find(|(i, _, _)| *i == ip).map(|(_, m, _)| m)
+    find(&parse_proc_arp(&text), interface, ip)
+}
+
+/// The entry for `ip` on `interface`.
+pub fn find(entries: &[(Ipv4Addr, Mac, String)], interface: &str, ip: Ipv4Addr) -> Option<Mac> {
+    entries.iter().find(|(i, _, dev)| *i == ip && dev == interface).map(|(_, m, _)| *m)
 }
 
 #[cfg(test)]
@@ -46,5 +52,7 @@ mod tests {
         assert_eq!(e[0].0, Ipv4Addr::new(10, 255, 7, 45));
         assert_eq!(e[0].1.to_string(), "dc:a6:32:03:fc:36");
         assert_eq!(e[0].2, "eno1");
+        assert_eq!(find(&e, "eno1", Ipv4Addr::new(10, 255, 7, 45)), Some(e[0].1));
+        assert_eq!(find(&e, "eno1.5", Ipv4Addr::new(10, 255, 7, 45)), None);
     }
 }

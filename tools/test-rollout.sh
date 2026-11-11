@@ -120,13 +120,16 @@ pids+=($!)
 
 cat >"$work/bootbob.toml" <<EOF
 data_dir = "$work/data"
-http = "$net.1:8067"
-tftp = "$net.1:69"
-nbd = "$net.1:10809"
-interface = "$br"
 ipxe_dir = "$ipxe"
-public_url = "$url"
+
+[control]
+http = ["$net.1:8067"]
+network = "$br"
 mdns = false
+
+[[boot]]
+interface = "$br"
+url = "$url"
 EOF
 RUST_LOG=info "$bootbob" --config "$work/bootbob.toml" >"$work/bootbob.log" 2>&1 &
 pids+=($!)
