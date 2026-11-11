@@ -227,8 +227,9 @@ the segment.
 6. ~~Unadmitted Pi~~: nothing, waiting.
 7. ~~eno1 too~~: yes, unadmitted-is-held everywhere by default.
 8. ~~Assign admits~~: yes.
-9. May I push the `multi-interface` branch so CI runs the QEMU e2e and rollout tests? They
-   need Linux, root and QEMU, so they can't run here. (Recommend yes.)
+9. ~~Push for CI~~: yes (2026-11-11). Rebased onto origin/master, pushed, and opened draft
+   PR https://github.com/cinderblock/BootBob/pull/1, since CI runs on pull requests, not
+   branch pushes. The repo is public, so CI is free.
 10. The CI VLAN's id and subnet, and whether steamboat's netplan should come into ops.
 
 ## Things not to do
