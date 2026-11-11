@@ -12,6 +12,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR cancels that PR's older run. Pushes to master each get their own group,
+# so every master commit is fully checked and published.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   backend:
     runs-on: ubuntu-24.04
@@ -34,6 +40,8 @@ jobs:
         with:
           name: bootbob-debug
           path: backend/target/debug/bootbob
+          # Only e2e, later in this run, uses it.
+          retention-days: 7
 
   web:
     runs-on: ubuntu-24.04
@@ -67,6 +75,8 @@ jobs:
         with:
           name: ipxe
           path: ipxe-out
+          # Only e2e, later in this run, uses it.
+          retention-days: 7
 
   e2e:
     needs: [backend, ipxe]
@@ -140,6 +150,9 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+        env:
+          # The build record artifact is only for looking at a build soon after it ran.
+          DOCKER_BUILD_RECORD_RETENTION_DAYS: 7
       - name: Summarize how to deploy this build
         run: |
           {
