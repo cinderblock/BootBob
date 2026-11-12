@@ -119,8 +119,8 @@ the segment.
 
 - Image stores on a VLAN: a CI Pi using an `uberfall:` disk would connect to uberfall's
   NBD directly, which isn't on the VLAN. Cameron (2026-11-11): "Steamboat should serve the
-  boot images as needed." Proposed: steamboat relays NBD from the store for a boot
-  interface that can't reach it (question 3).
+  boot images as needed." A relay was proposed and declined (question 3): VLAN machines
+  use disks on steamboat.
 - Read-only exports (ISSUES.md, `bc912f6`).
 - Authentication on the control API: still none; it's reachable only where `[control]`
   listens.
@@ -236,7 +236,11 @@ the segment.
 2. ~~API/UI on restricted interfaces~~: answered, separate config sets.
 3. Stores: Cameron: "Steamboat should serve the boot images as needed." Proposed: for a
    boot interface that can't reach a store, steamboat relays NBD to the store (one copy,
-   overlays stay on the store), rather than copying the disk. Awaiting his yes.
+   overlays stay on the store), rather than copying the disk. Cameron (2026-11-11): "for
+   what purpose? probably no." **Decided: no relay.** Disks for VLAN machines live on
+   steamboat itself (an image uploaded there, or a store disk cached there by hand with a
+   `store:<store>/<disk>.img` catalogue entry). A store disk assigned to a VLAN machine
+   won't boot, since the VLAN can't reach the store.
 4. ~~Config shape~~: superseded by `[control]` + `[[boot]]`.
 5. ~~Shared address:port~~: yes.
 6. ~~Unadmitted Pi~~: nothing, waiting.
