@@ -229,7 +229,12 @@ the segment.
 8. ~~Assign admits~~: yes.
 9. ~~Push for CI~~: yes (2026-11-11). Rebased onto origin/master, pushed, and opened draft
    PR https://github.com/cinderblock/BootBob/pull/1, since CI runs on pull requests, not
-   branch pushes. The repo is public, so CI is free.
+   branch pushes. The repo is public, so CI is free. All 6 PR checks passed on c8e45c8
+   (backend, web, ipxe, docker, e2e; publish skipped, it runs only on master). The rollout
+   test (pc-golden.yml) runs only on master or by hand, so it was dispatched on the branch:
+   https://github.com/cinderblock/BootBob/actions/runs/43124221939 passed, 2026-11-11
+   4:20 PM PST (00:20Z). Next: Cameron's yes to merge (master publishes the image), then the
+   ops change with its own yes.
 10. The CI VLAN's id and subnet, and whether steamboat's netplan should come into ops.
 
 ## Things not to do
