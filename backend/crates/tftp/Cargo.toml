@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 bytes.workspace = true
+socket2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

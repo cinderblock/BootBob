@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { BootInterface } from "./api";
 import { Catalogue } from "./catalogue";
 import { Devices } from "./devices";
 import { Doctor } from "./doctor";
@@ -10,6 +11,29 @@ import { SettingsView } from "./settings";
 
 const tabs = ["Machines", "Images", "Rollouts", "Catalogue", "Network check", "Settings", "Log"] as const;
 type Tab = (typeof tabs)[number];
+
+function ifaceChip(i: BootInterface): string {
+  if (!i.address) return "chip bad";
+  if (i.listener && !i.listener.running) return "chip warn";
+  return "chip ok";
+}
+
+function ifaceTitle(i: BootInterface, bootFile: string): string {
+  const lines = [
+    `${i.interface}${i.parent ? ` on ${i.parent}` : ""}${i.address ? `, ${i.address}` : ", waiting for the interface"}`,
+    `Serves: ${i.services.join(", ")}`,
+    `Boot file name: ${bootFile}`,
+    `${i.admitted} machines admitted`,
+  ];
+  if (i.listener) {
+    lines.push(
+      i.listener.running
+        ? `DHCP listener: ${i.listener.pxe_seen} PXE requests of ${i.listener.dhcp_seen} DHCP messages seen`
+        : `DHCP listener stopped${i.listener.error ? `: ${i.listener.error}` : ""}`,
+    );
+  }
+  return lines.join("\n");
+}
 
 export function App() {
   const live = useLive();
@@ -36,15 +60,17 @@ export function App() {
           </span>
           {s && (
             <>
-              <span className={s.tftp ? "chip ok" : "chip warn"} title={`Boot file name: ${s.boot_filename}`}>
-                TFTP {s.tftp ?? "off"}
-              </span>
-              <span
-                className={s.listener.running ? "chip ok" : s.listener.interface ? "chip bad" : "chip"}
-                title={s.listener.error ?? `${s.listener.pxe_seen} PXE requests of ${s.listener.dhcp_seen} DHCP messages seen`}
-              >
-                DHCP listener {s.listener.running ? `on ${s.listener.interface}` : s.listener.interface ? "stopped" : "off"}
-              </span>
+              {s.interfaces.length === 0 && (
+                <span className="chip bad" title="Add a [[boot]] section to the config">
+                  no boot interfaces
+                </span>
+              )}
+              {s.interfaces.map((i) => (
+                <span key={i.interface} className={ifaceChip(i)} title={ifaceTitle(i, s.boot_filename)}>
+                  {i.label}
+                  {i.vlan !== null && ` · VLAN ${i.vlan}`}
+                </span>
+              ))}
               <span className={s.ipxe_builds.length ? "chip ok" : "chip bad"} title={s.ipxe_builds.join("\n") || "No iPXE builds found"}>
                 iPXE {s.ipxe_builds.length ? `${s.ipxe_builds.length} builds` : "missing"}
               </span>

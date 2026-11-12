@@ -101,11 +101,15 @@ pub struct Config {
     pub timeout: Duration,
     /// Retransmissions of one window before giving up.
     pub retries: u32,
+    /// The network interface the server is bound to, if it is (see [`bind_on`]). Each
+    /// transfer's socket is bound to it too, so a transfer only ever talks on the interface
+    /// its request came in on.
+    pub device: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { max_blksize: 1468, max_windowsize: 32, timeout: Duration::from_secs(1), retries: 5 }
+        Config { max_blksize: 1468, max_windowsize: 32, timeout: Duration::from_secs(1), retries: 5, device: None }
     }
 }
 
@@ -160,6 +164,24 @@ pub async fn serve<R: Resolver>(socket: UdpSocket, resolver: Arc<R>, config: Con
 /// Binds a socket for [`serve`].
 pub async fn bind(ip: IpAddr, port: u16) -> io::Result<UdpSocket> {
     UdpSocket::bind(SocketAddr::new(ip, port)).await
+}
+
+/// Binds a UDP socket to `ip:port`, and to the network interface `device` when one is given
+/// (`SO_BINDTODEVICE`, Linux only): it then only receives what arrived on that interface,
+/// whatever the destination address. Linux accepts a packet for any of its addresses on any
+/// interface, so the address alone doesn't keep interfaces apart. Needs a Tokio runtime.
+pub fn bind_on(ip: IpAddr, port: u16, device: Option<&str>) -> io::Result<UdpSocket> {
+    let addr = SocketAddr::new(ip, port);
+    let sock = socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    if let Some(dev) = device {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        sock.bind_device(Some(dev.as_bytes()))?;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        return Err(io::Error::new(io::ErrorKind::Unsupported, format!("binding to interface {dev} needs Linux")));
+    }
+    sock.set_nonblocking(true)?;
+    sock.bind(&addr.into())?;
+    UdpSocket::from_std(sock.into())
 }
 
 #[cfg(test)]

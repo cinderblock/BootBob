@@ -67,11 +67,16 @@ pids+=($!)
 
 cat >"$work/bootbob.toml" <<EOF
 data_dir = "$work/data"
-http = "$net.1:8067"
-tftp = "$net.1:69"
-interface = "$br"
 ipxe_dir = "$ipxe"
 default_firmware = "efi-arm64"
+
+[control]
+http = ["$net.1:8067"]
+network = "$br"
+
+[[boot]]
+interface = "$br"
+services = ["listen", "tftp", "http"]
 EOF
 RUST_LOG=info,bootbob=debug "$bootbob" --config "$work/bootbob.toml" >"$work/bootbob.log" 2>&1 &
 pids+=($!)

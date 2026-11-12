@@ -469,3 +469,27 @@ ul.checks .fix {
   margin-top: 4px;
   color: var(--accent);
 }
+
+.tag.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.device-group + .device-group {
+  margin-top: 24px;
+}
+
+.group-title {
+  font-size: 15px;
+  margin: 0 0 8px;
+}
+
+.admission {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+
+.admission li {
+  margin: 4px 0;
+}

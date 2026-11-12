@@ -49,6 +49,40 @@ pub struct Device {
     pub moving: Option<Move>,
     /// It didn't reboot when told to, so it isn't asked again before this.
     pub not_before: Option<Millis>,
+    /// The boot interfaces it's admitted to (by interface name). Anywhere else it's held at
+    /// the fallback menu with only public images, and a Pi gets nothing.
+    pub admitted: Vec<String>,
+    /// Where it has been seen, by boot interface.
+    pub seen: std::collections::BTreeMap<String, Sighting>,
+}
+
+/// A machine seen on one boot interface.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sighting {
+    pub at: Millis,
+    pub ip: Option<String>,
+    /// The interface's VLAN, when it's a VLAN subinterface.
+    pub vlan: Option<u16>,
+}
+
+impl Device {
+    pub fn is_admitted(&self, iface: &str) -> bool {
+        self.admitted.iter().any(|a| a == iface)
+    }
+
+    /// Whether what's seen on `iface` may describe this machine (its address, firmware,
+    /// SMBIOS): it's admitted there, or nowhere yet (a new machine waiting to be admitted).
+    /// A machine admitted elsewhere keeps its description, since whatever is asking here may
+    /// only be claiming its MAC.
+    pub fn speaks_for(&self, iface: &str) -> bool {
+        self.admitted.is_empty() || self.is_admitted(iface)
+    }
+
+    /// The boot interface it was seen on last.
+    pub fn last_seen_on(&self) -> Option<&str> {
+        self.seen.iter().max_by_key(|(_, s)| s.at).map(|(i, _)| i.as_str())
+    }
 }
 
 /// A running machine reporting in.
@@ -215,6 +249,10 @@ pub struct Image {
     /// partition over HTTP, the root filesystem over NBD. Instead of `action`.
     #[serde(default)]
     pub disk: Option<DiskBoot>,
+    /// Machines that aren't admitted may boot it too: it's listed on their menu, and its
+    /// disk and boot files are theirs to read. For things anyone may run, such as installers.
+    #[serde(default)]
+    pub public: bool,
     #[serde(default, skip_deserializing)]
     pub builtin: bool,
 }
@@ -395,6 +433,8 @@ pub fn builtin_images() -> Vec<Image> {
         action,
         pi: None,
         disk: None,
+        // Nothing they boot comes from BootBob's disks.
+        public: true,
         builtin: true,
     };
     vec![

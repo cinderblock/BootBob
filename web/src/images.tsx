@@ -43,6 +43,7 @@ const blank = (): Draft => ({
   title: "",
   group: "",
   kind: "kernel",
+  public: false,
   url: "",
   kernel: "",
   initrds: "",
@@ -78,13 +79,14 @@ interface Draft {
   diskInitrd: string;
   diskCmdline: string;
   keepDisk: DiskBoot | null;
+  public: boolean;
   /** The half the editor isn't showing, kept as it was: an image can have both. */
   keepAction: Action | null;
   keepPi: PiBoot | null;
 }
 
 function toDraft(i: Image): Draft {
-  const d = { ...blank(), id: i.id, title: i.title, group: i.group, keepAction: i.action, keepPi: i.pi, keepDisk: i.disk };
+  const d = { ...blank(), id: i.id, title: i.title, group: i.group, public: i.public, keepAction: i.action, keepPi: i.pi, keepDisk: i.disk };
   if (i.disk) {
     const k = i.disk;
     return { ...d, kind: "disk", source: k.source, diskKernel: k.kernel, diskInitrd: k.initrd, diskCmdline: k.cmdline, piCow: k.cow };
@@ -177,7 +179,10 @@ export function Images({ live }: { live: Live }) {
               <td>
                 <strong>{i.title}</strong> <span className="muted small">{i.id}</span>
               </td>
-              <td>{i.group || <span className="muted">not listed</span>}</td>
+              <td>
+                {i.group || <span className="muted">not listed</span>}
+                {i.public && !i.builtin && <span className="tag">public</span>}
+              </td>
               <td className="muted">{describeImage(i)}</td>
               <td className="actions">
                 {i.builtin ? (
@@ -207,7 +212,7 @@ export function Images({ live }: { live: Live }) {
           className="editor"
           onSubmit={(e) => {
             e.preventDefault();
-            api.putImage({ id: draft.id.trim(), title: draft.title.trim(), group: draft.group.trim(), ...toBoot(draft) }).then(
+            api.putImage({ id: draft.id.trim(), title: draft.title.trim(), group: draft.group.trim(), public: draft.public, ...toBoot(draft) }).then(
               () => {
                 setDraft(null);
                 setError(null);
@@ -368,6 +373,10 @@ export function Images({ live }: { live: Live }) {
               iPXE script <textarea rows={8} className="mono" value={draft.script} onInput={(e) => set({ script: e.currentTarget.value })} />
             </label>
           )}
+          <label title="Machines that aren't admitted see it on their menu, and may read its disk and boot files.">
+            <input type="checkbox" checked={draft.public} onChange={(e) => set({ public: e.currentTarget.checked })} /> Public: machines that
+            aren't admitted may boot it too
+          </label>
           <div className="buttons">
             <button type="submit">Save</button>
             <button type="button" className="secondary" onClick={() => setDraft(null)}>

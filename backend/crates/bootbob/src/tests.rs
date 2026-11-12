@@ -11,11 +11,49 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use crate::config::Config;
-use crate::http::router;
+use crate::config::{BootIface, Config};
 use crate::model::*;
 use crate::state::State;
 
+/// The boot interface the tests' machines are on, at 10.255.0.5.
+pub(crate) const IF: &str = "eth0";
+/// Where a request comes from when it doesn't say (`ip=`).
+const PEER: Ipv4Addr = Ipv4Addr::new(10, 255, 7, 9);
+
+pub(crate) fn boot() -> Vec<BootIface> {
+    vec![BootIface::new(IF, Some(Ipv4Addr::new(10, 255, 0, 5)))]
+}
+
+/// The control plane and [`IF`]'s boot routes on one socket, as on a LAN server. A request
+/// comes from the `ip=` it carries (else [`PEER`]), and the interface's neighbour table
+/// knows that address as the `mac=` it carries: what the kernel would know of a machine
+/// that asked. Tests of a machine claiming another's MAC go through [`router_raw`].
+fn router(st: Arc<State>) -> axum::Router {
+    let st2 = st.clone();
+    router_raw(st).layer(axum::middleware::map_request(move |mut req: Request<Body>| {
+        let st = st2.clone();
+        async move {
+            if req.extensions().get::<axum::extract::ConnectInfo<SocketAddr>>().is_none() {
+                let q = req.uri().query().unwrap_or("").to_string();
+                let param = |k: &str| q.split('&').find_map(|kv| kv.strip_prefix(&format!("{k}="))).map(String::from);
+                let ip: Ipv4Addr = param("ip").and_then(|s| s.parse().ok()).unwrap_or(PEER);
+                if let Some(mac) = param("mac").and_then(|m| m.parse::<Mac>().ok()) {
+                    st.learn_address(IF, ip, mac);
+                }
+                req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from((ip, 40000))));
+            }
+            req
+        }
+    }))
+}
+
+/// [`router`] without the help: requests must carry their own peer address.
+fn router_raw(st: Arc<State>) -> axum::Router {
+    crate::http::shared_router(st, IF)
+}
+
+#[path = "admission_tests.rs"]
+mod admission_tests;
 #[path = "cache_tests.rs"]
 mod cache_tests;
 #[path = "rollout_tests.rs"]
@@ -32,7 +70,7 @@ fn setup() -> T {
     std::fs::create_dir_all(&ipxe).unwrap();
     std::fs::write(ipxe.join("bootbob-efi-x64.efi"), b"EFI-X64").unwrap();
     std::fs::write(ipxe.join("bootbob-bios.kpxe"), b"BIOS").unwrap();
-    let config = Config { data_dir: dir.path().join("data"), ipxe_dir: ipxe, ..Config::default() };
+    let config = Config { data_dir: dir.path().join("data"), ipxe_dir: ipxe, boot: boot(), ..Config::default() };
     T { st: Arc::new(State::open(config).unwrap()), _dir: dir }
 }
 
@@ -92,6 +130,7 @@ async fn unknown_machine_gets_the_polling_menu_and_shows_up() {
     assert_eq!(d["next"]["image"], "menu");
     let kinds: Vec<String> = t.st.events(None, 10).into_iter().map(|e| e.kind).collect();
     assert_eq!(kinds, vec!["discovered", "menu"]);
+    assert!(t.st.events(None, 10)[1].message.contains("not admitted on eth0"));
 
     // Polling doesn't log a new event each time.
     get(&t.st, &ident("&poll=1")).await;
@@ -221,7 +260,7 @@ fn discover(mac: Mac, fw: Firmware) -> Seen {
 async fn the_listener_finds_netbooting_machines_only() {
     let t = setup();
     let pc: Mac = "aa:bb:cc:00:00:01".parse().unwrap();
-    t.st.observe(discover(pc, Firmware::Bios));
+    t.st.observe(IF, discover(pc, Firmware::Bios));
     let d = t.st.device(pc).unwrap();
     assert_eq!(d.firmware.as_deref(), Some("bios"));
     assert_eq!(d.dhcp.as_ref().unwrap().arches, vec![0]);
@@ -230,7 +269,7 @@ async fn the_listener_finds_netbooting_machines_only() {
     let phone: Mac = "aa:bb:cc:00:00:02".parse().unwrap();
     let mut m = Message::request(2, phone);
     m.set_opt(OPT_MESSAGE_TYPE, [1]);
-    t.st.observe(Seen::Dhcp { src_mac: phone, src_ip: Ipv4Addr::UNSPECIFIED, dst_ip: Ipv4Addr::BROADCAST, from_server: false, msg: m });
+    t.st.observe(IF, Seen::Dhcp { src_mac: phone, src_ip: Ipv4Addr::UNSPECIFIED, dst_ip: Ipv4Addr::BROADCAST, from_server: false, msg: m });
     assert!(t.st.device(phone).is_none());
 
     // UniFi's offer to the PC: learn its address and what it was told.
@@ -241,27 +280,30 @@ async fn the_listener_finds_netbooting_machines_only() {
     offer.file = b"bootbob".to_vec();
     offer.set_opt(OPT_MESSAGE_TYPE, [2]);
     offer.set_opt(OPT_SERVER_ID, [10, 255, 0, 1]);
-    t.st.observe(Seen::Dhcp {
-        src_mac: "f4:e2:c6:00:00:01".parse().unwrap(),
-        src_ip: Ipv4Addr::new(10, 255, 0, 1),
-        dst_ip: Ipv4Addr::BROADCAST,
-        from_server: true,
-        msg: offer,
-    });
+    t.st.observe(
+        IF,
+        Seen::Dhcp {
+            src_mac: "f4:e2:c6:00:00:01".parse().unwrap(),
+            src_ip: Ipv4Addr::new(10, 255, 0, 1),
+            dst_ip: Ipv4Addr::BROADCAST,
+            from_server: true,
+            msg: offer,
+        },
+    );
     let d = t.st.device(pc).unwrap();
     let o = d.dhcp.unwrap().offer.unwrap();
     assert_eq!(o.boot_server.as_deref(), Some("10.255.0.5"));
     assert_eq!(o.boot_file.as_deref(), Some("bootbob"));
     assert_eq!(o.server.as_deref(), Some("10.255.0.1"));
-    assert_eq!(t.st.mac_for(Ipv4Addr::new(10, 255, 7, 20)), Some(pc));
-    assert_eq!(t.st.listener.read().unwrap().pxe_seen, 1);
+    assert_eq!(t.st.mac_for(IF, Ipv4Addr::new(10, 255, 7, 20)), Some(pc));
+    assert_eq!(t.st.listeners.read().unwrap()[IF].pxe_seen, 1);
 }
 
 #[tokio::test]
 async fn a_machine_that_never_reaches_us_is_flagged() {
     let t = setup();
     let pc: Mac = "aa:bb:cc:00:00:03".parse().unwrap();
-    t.st.observe(discover(pc, Firmware::EfiX64));
+    t.st.observe(IF, discover(pc, Firmware::EfiX64));
     // Pretend the discover was a minute ago and nothing followed.
     t.st.edit_device(pc, |d| d.dhcp.as_mut().unwrap().last_discover = now_ms() - 60_000);
     let v = json(&t.st, &format!("/api/devices/{pc}")).await;
@@ -293,13 +335,13 @@ async fn served(r: Resolution) -> Option<Vec<u8>> {
 #[tokio::test]
 async fn one_boot_filename_serves_each_firmware_its_own_ipxe() {
     let t = setup();
-    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    let tftp = crate::tftp::Tftp { st: t.st.clone(), iface: IF.into() };
     let bios: Mac = "aa:bb:cc:00:00:04".parse().unwrap();
     let uefi: Mac = "aa:bb:cc:00:00:05".parse().unwrap();
-    t.st.observe(discover(bios, Firmware::Bios));
-    t.st.observe(discover(uefi, Firmware::EfiX64));
-    t.st.learn_address(Ipv4Addr::new(10, 255, 7, 30), bios);
-    t.st.learn_address(Ipv4Addr::new(10, 255, 7, 31), uefi);
+    t.st.observe(IF, discover(bios, Firmware::Bios));
+    t.st.observe(IF, discover(uefi, Firmware::EfiX64));
+    t.st.learn_address(IF, Ipv4Addr::new(10, 255, 7, 30), bios);
+    t.st.learn_address(IF, Ipv4Addr::new(10, 255, 7, 31), uefi);
 
     assert_eq!(served(tftp.resolve(&tftp_req([10, 255, 7, 30], "bootbob")).await).await.unwrap(), b"BIOS");
     assert_eq!(served(tftp.resolve(&tftp_req([10, 255, 7, 31], "/bootbob")).await).await.unwrap(), b"EFI-X64");
@@ -316,7 +358,7 @@ async fn one_boot_filename_serves_each_firmware_its_own_ipxe() {
 #[tokio::test]
 async fn everything_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let config = Config { data_dir: dir.path().to_path_buf(), ..Config::default() };
+    let config = Config { data_dir: dir.path().to_path_buf(), boot: boot(), ..Config::default() };
     let mac: Mac = MAC.parse().unwrap();
     {
         let st = State::open(config.clone()).unwrap();
@@ -327,6 +369,7 @@ async fn everything_survives_a_restart() {
             action: Some(bootbob_ipxe::Action::Reboot),
             pi: None,
             disk: None,
+            public: false,
             builtin: false,
         })
         .unwrap();
@@ -345,7 +388,11 @@ async fn everything_survives_a_restart() {
 
 #[tokio::test]
 async fn probe_replies_go_to_the_doctor_not_the_device_list() {
-    let t = setup();
+    // Probes go out on the control network.
+    let T { st, _dir } = setup();
+    let config = Config { control: crate::config::Control { network: Some(IF.into()), ..Default::default() }, ..st.config.clone() };
+    drop(st);
+    let t = T { st: Arc::new(State::open(config).unwrap()), _dir };
     let mac = probe::probe_mac(42);
     t.st.expect_probe(42);
     let mut offer = Message::request(42, mac);
@@ -355,19 +402,34 @@ async fn probe_replies_go_to_the_doctor_not_the_device_list() {
     offer.set_opt(OPT_MESSAGE_TYPE, [2]);
     offer.set_opt(OPT_SERVER_ID, [10, 255, 0, 1]);
     offer.set_opt(OPT_TZ_NAME, b"America/Los_Angeles".to_vec());
-    t.st.observe(Seen::Dhcp {
-        src_mac: "f4:e2:c6:00:00:01".parse().unwrap(),
-        src_ip: Ipv4Addr::new(10, 255, 0, 1),
-        dst_ip: Ipv4Addr::BROADCAST,
-        from_server: true,
-        msg: offer,
-    });
+    t.st.observe(
+        IF,
+        Seen::Dhcp {
+            src_mac: "f4:e2:c6:00:00:01".parse().unwrap(),
+            src_ip: Ipv4Addr::new(10, 255, 0, 1),
+            dst_ip: Ipv4Addr::BROADCAST,
+            from_server: true,
+            msg: offer,
+        },
+    );
     let offers = t.st.take_probe(42);
     assert_eq!(offers.len(), 1);
     assert_eq!(offers[0].boot_file.as_deref(), Some("bootbob"));
     assert_eq!(offers[0].time_zone.as_deref(), Some("America/Los_Angeles"));
     assert!(t.st.device(mac).is_none());
     assert!(t.st.take_probe(42).is_empty());
+
+    // Heard on any interface but the control network, a reply doesn't count: a machine on a
+    // boot VLAN could forge one to move the rollout window.
+    t.st.expect_probe(43);
+    let mut forged = Message::request(43, probe::probe_mac(43));
+    forged.op = 2;
+    forged.set_opt(OPT_MESSAGE_TYPE, [2]);
+    forged.set_opt(OPT_TZ_NAME, b"Pacific/Kiritimati".to_vec());
+    let src_mac = "02:00:00:00:00:66".parse().unwrap();
+    let src_ip = Ipv4Addr::new(10, 5, 0, 66);
+    t.st.observe("eth0.5", Seen::Dhcp { src_mac, src_ip, dst_ip: Ipv4Addr::BROADCAST, from_server: true, msg: forged });
+    assert!(t.st.take_probe(43).is_empty());
 }
 
 #[tokio::test]
@@ -435,9 +497,9 @@ async fn pi_file(tftp: &crate::tftp::Tftp, ip: [u8; 4], path: &str) -> Option<Ve
 #[tokio::test]
 async fn an_unassigned_pi_gets_nothing_and_shows_up_waiting() {
     let t = setup();
-    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    let tftp = crate::tftp::Tftp { st: t.st.clone(), iface: IF.into() };
     let pi: Mac = PI.parse().unwrap();
-    t.st.learn_address(Ipv4Addr::from(PI_IP), pi);
+    t.st.learn_address(IF, Ipv4Addr::from(PI_IP), pi);
 
     assert!(pi_file(&tftp, PI_IP, "6a6f4d1d/start4.elf").await.is_none());
     assert!(pi_file(&tftp, PI_IP, "start4.elf").await.is_none());
@@ -448,6 +510,15 @@ async fn an_unassigned_pi_gets_nothing_and_shows_up_waiting() {
     assert_eq!(d["state"], "pi_waiting", "{d}");
     assert_eq!(d["next"]["title"], "Nothing");
     let msgs: Vec<String> = t.st.events(Some(PI), 10).into_iter().map(|e| e.message).collect();
+    assert_eq!(msgs.iter().filter(|m| m.contains("isn't admitted there")).count(), 1, "{msgs:?}");
+    assert_eq!(d["next"]["reason"], "not admitted on eth0");
+
+    // Admitted, but with nothing to boot: still nothing, and it says why.
+    t.st.set_admitted(pi, IF, true).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    t.st.update_device(pi, |d| d.tftp = None);
+    assert!(pi_file(&tftp, PI_IP, "start4.elf").await.is_none());
+    let msgs: Vec<String> = t.st.events(Some(PI), 10).into_iter().map(|e| e.message).collect();
     assert_eq!(msgs.iter().filter(|m| m.contains("no Pi image assigned")).count(), 1, "{msgs:?}");
 }
 
@@ -455,9 +526,9 @@ async fn an_unassigned_pi_gets_nothing_and_shows_up_waiting() {
 async fn an_assigned_pi_boots_its_tree_with_overrides() {
     let t = setup();
     pi_tree(&t);
-    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    let tftp = crate::tftp::Tftp { st: t.st.clone(), iface: IF.into() };
     let pi: Mac = PI.parse().unwrap();
-    t.st.learn_address(Ipv4Addr::from(PI_IP), pi);
+    t.st.learn_address(IF, Ipv4Addr::from(PI_IP), pi);
 
     let (s, body) = put_pi_image(
         &t,
@@ -503,17 +574,24 @@ async fn an_assigned_pi_boots_its_tree_with_overrides() {
 }
 
 #[tokio::test]
-async fn a_mac_prefix_identifies_the_pi_and_the_pi_default_applies() {
+async fn a_mac_prefix_must_agree_and_the_pi_default_applies() {
     let t = setup();
     pi_tree(&t);
-    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    let tftp = crate::tftp::Tftp { st: t.st.clone(), iface: IF.into() };
     put_pi_image(&t, "pios", json!({"source": "pios"})).await;
     let mut s = t.st.settings();
     s.pi_default_image = "pios".into();
     t.st.put_settings(s).unwrap();
 
-    // No IP → MAC knowledge at all: the prefix says who it is.
+    // No IP → MAC knowledge at all: a prefix alone doesn't say who it is, or anything could
+    // name any Pi.
     let ip = [10, 255, 7, 41];
+    let mac: Mac = "dc:a6:32:0a:0b:0c".parse().unwrap();
+    assert!(pi_file(&tftp, ip, "dc-a6-32-0a-0b-0c/start4.elf").await.is_none());
+    assert!(t.st.device(mac).is_none());
+    // The interface knows it, and it's admitted: the prefix agrees, the Pi default applies.
+    t.st.learn_address(IF, Ipv4Addr::from(ip), mac);
+    t.st.set_admitted(mac, IF, true).unwrap();
     assert_eq!(pi_file(&tftp, ip, "dc-a6-32-0a-0b-0c/start4.elf").await.unwrap(), b"FIRMWARE");
     let d = t.st.device("dc:a6:32:0a:0b:0c".parse().unwrap()).unwrap();
     assert_eq!(d.last_boot.unwrap().reason, "no assignment; Raspberry Pi default");
@@ -580,12 +658,12 @@ async fn nbd_exports_go_only_to_the_machine_assigned_the_disk() {
     assert_eq!(s, StatusCode::OK, "{body}");
     let desky: Mac = PI.parse().unwrap();
     let other: Mac = "dc:a6:32:09:09:09".parse().unwrap();
-    t.st.learn_address(Ipv4Addr::from(PI_IP), desky);
-    t.st.learn_address(Ipv4Addr::new(10, 255, 7, 50), other);
+    t.st.learn_address(IF, Ipv4Addr::from(PI_IP), desky);
+    t.st.learn_address(IF, Ipv4Addr::new(10, 255, 7, 50), other);
     t.st.assign(desky, Some(Assignment { image: "desky".into(), once: true, set_at: 0, track: None })).unwrap();
     t.st.update_device(other, |_| {});
 
-    let nbd = crate::nbd::Nbd { st: t.st.clone() };
+    let nbd = crate::nbd::Nbd { st: t.st.clone(), iface: IF.into() };
     let peer = |ip: [u8; 4]| SocketAddr::from((ip, 40000));
     assert_eq!(nbd.list(peer(PI_IP)), vec!["desky.img"]);
     assert!(nbd.open("desky.img", peer(PI_IP)).is_ok());
@@ -622,12 +700,12 @@ async fn a_cow_image_gives_each_pi_its_own_overlay() {
 
     let (a, b): (Mac, Mac) = (PI.parse().unwrap(), "dc:a6:32:00:00:0b".parse().unwrap());
     let (ip_a, ip_b) = (Ipv4Addr::from(PI_IP), Ipv4Addr::new(10, 255, 7, 41));
-    t.st.learn_address(ip_a, a);
-    t.st.learn_address(ip_b, b);
+    t.st.learn_address(IF, ip_a, a);
+    t.st.learn_address(IF, ip_b, b);
     for m in [a, b] {
         t.st.assign(m, Some(Assignment { image: "golden".into(), once: false, set_at: 0, track: None })).unwrap();
     }
-    let nbd = crate::nbd::Nbd { st: t.st.clone() };
+    let nbd = crate::nbd::Nbd { st: t.st.clone(), iface: IF.into() };
     let peer = |ip: Ipv4Addr| SocketAddr::from((ip, 40000));
     let ex_a = nbd.open("golden.img", peer(ip_a)).unwrap();
     let ex_b = nbd.open("golden.img", peer(ip_b)).unwrap();
@@ -651,7 +729,7 @@ async fn a_cow_image_gives_each_pi_its_own_overlay() {
 
     // TFTP reads A's boot files through its overlay (here unchanged, so still golden),
     // and B's straight from the image.
-    let tftp = crate::tftp::Tftp { st: t.st.clone() };
+    let tftp = crate::tftp::Tftp { st: t.st.clone(), iface: IF.into() };
     assert_eq!(pi_file(&tftp, PI_IP, "6a6f4d1d/start4.elf").await.unwrap(), b"GOLDEN");
     assert_eq!(pi_file(&tftp, [10, 255, 7, 41], "start4.elf").await.unwrap(), b"GOLDEN");
 
@@ -704,7 +782,8 @@ async fn a_pc_boots_a_disk_image_with_its_root_over_nbd() {
     both["action"] = json!({"kind": "reboot"});
     assert_eq!(call(&t.st, Method::PUT, "/api/images/both", Some(both)).await.0, StatusCode::BAD_REQUEST);
 
-    // It's in the PC menu, and an assigned PC gets kernel + initrd from the image.
+    // It's in an admitted PC's menu, and an assigned PC gets kernel + initrd from the image.
+    call(&t.st, Method::PUT, &format!("/api/devices/{MAC}/admitted/{IF}"), None).await;
     let first = get(&t.st, &ident("")).await;
     assert!(first.contains("item img_debian"), "{first}");
     call(&t.st, Method::PUT, &format!("/api/devices/{MAC}/assignment"), Some(json!({"image": "debian"}))).await;
@@ -717,18 +796,19 @@ async fn a_pc_boots_a_disk_image_with_its_root_over_nbd() {
 
     // The files themselves, straight from the image's boot partition.
     assert_eq!(get(&t.st, "/boot/disk/debian/vmlinuz?mac=52-54-00-12-34-56").await, "KERNEL");
-    assert_eq!(get(&t.st, "/boot/disk/debian/initrd.img").await, "INITRD");
-    assert_eq!(call(&t.st, Method::GET, "/boot/disk/debian/nope", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(get(&t.st, "/boot/disk/debian/initrd.img?mac=52-54-00-12-34-56").await, "INITRD");
+    assert_eq!(call(&t.st, Method::GET, "/boot/disk/debian/nope?mac=52-54-00-12-34-56", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&t.st, Method::GET, "/boot/disk/debian/initrd.img", None).await.0, StatusCode::FORBIDDEN, "not to just anyone");
     assert_eq!(call(&t.st, Method::GET, "/boot/disk/nope/vmlinuz", None).await.0, StatusCode::NOT_FOUND);
 
     // NBD: the assigned PC gets the disk, through its own overlay; nobody else does.
     let mac: Mac = MAC.parse().unwrap();
-    t.st.learn_address(Ipv4Addr::new(10, 255, 7, 9), mac);
-    let nbd = crate::nbd::Nbd { st: t.st.clone() };
+    t.st.learn_address(IF, Ipv4Addr::new(10, 255, 7, 9), mac);
+    let nbd = crate::nbd::Nbd { st: t.st.clone(), iface: IF.into() };
     let ex = nbd.open("debian.img", SocketAddr::from(([10, 255, 7, 9], 40000))).unwrap();
     assert!(ex.overlay.is_some());
     let other: Mac = "52:54:00:00:00:99".parse().unwrap();
-    t.st.learn_address(Ipv4Addr::new(10, 255, 7, 99), other);
+    t.st.learn_address(IF, Ipv4Addr::new(10, 255, 7, 99), other);
     t.st.update_device(other, |_| {});
     assert!(nbd.open("debian.img", SocketAddr::from(([10, 255, 7, 99], 40000))).is_err());
 }
@@ -888,8 +968,14 @@ async fn a_store_trims_plain_disks_and_overlays() {
     std::fs::create_dir_all(&ipxe).unwrap();
     let store_config = crate::config::StoreConfig { name: "s1".into(), url: store_url, nbd_host: Some("10.255.0.3".into()) };
     let main = Arc::new(
-        State::open(Config { data_dir: dirs.0.path().join("data"), ipxe_dir: ipxe, stores: vec![store_config], ..Config::default() })
-            .unwrap(),
+        State::open(Config {
+            data_dir: dirs.0.path().join("data"),
+            ipxe_dir: ipxe,
+            stores: vec![store_config],
+            boot: boot(),
+            ..Config::default()
+        })
+        .unwrap(),
     );
     let store = Arc::new(
         State::open(Config {
@@ -921,7 +1007,7 @@ async fn a_store_trims_plain_disks_and_overlays() {
         assert_eq!(s, StatusCode::OK, "{body}");
     }
     get(&main, &ident("")).await;
-    main.learn_address(Ipv4Addr::LOCALHOST, MAC.parse().unwrap());
+    main.learn_address(IF, Ipv4Addr::LOCALHOST, MAC.parse().unwrap());
 
     for (image, disk, cow, was) in [("cow", "golden.img", true, 5u8), ("plain", "plain.img", false, 6u8)] {
         let (s, body) = call(&main, Method::PUT, &format!("/api/devices/{MAC}/assignment"), Some(json!({"image": image}))).await;
@@ -960,6 +1046,7 @@ async fn a_store_serves_disks_the_main_server_decides_about() {
             data_dir: dirs.0.path().join("data"),
             ipxe_dir: ipxe,
             stores: vec![crate::config::StoreConfig { name: "s1".into(), url: store_url.clone(), nbd_host: Some("10.255.0.3".into()) }],
+            boot: boot(),
             ..Config::default()
         })
         .unwrap(),
@@ -989,7 +1076,8 @@ async fn a_store_serves_disks_the_main_server_decides_about() {
     // The main server lists the store's disks, and fetches boot files from it.
     let v = json(&main, "/api/pi/sources").await;
     assert!(v.as_array().unwrap().iter().any(|s| s["path"] == "s1:golden.img"), "{v}");
-    assert_eq!(get(&main, "/boot/disk/golden/vmlinuz").await, "STORE-KERNEL");
+    main.set_admitted(MAC.parse().unwrap(), IF, true).unwrap();
+    assert_eq!(get(&main, "/boot/disk/golden/vmlinuz?mac=52-54-00-12-34-56").await, "STORE-KERNEL");
 
     // A PC assigned it boots with the store as its NBD server.
     get(&main, &ident("")).await;
@@ -999,7 +1087,7 @@ async fn a_store_serves_disks_the_main_server_decides_about() {
 
     // The store asks the main server; only the assigned machine gets the disk.
     let mac: Mac = MAC.parse().unwrap();
-    main.learn_address(Ipv4Addr::new(10, 255, 7, 9), mac);
+    main.learn_address(IF, Ipv4Addr::new(10, 255, 7, 9), mac);
     let exports = crate::nbd::StoreExports { st: store.clone() };
     let ex = exports.open("golden.img", SocketAddr::from(([10, 255, 7, 9], 40000))).unwrap();
     let (dir, name) = ex.overlay.clone().expect("copy-on-write, so through an overlay");

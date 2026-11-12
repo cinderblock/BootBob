@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type BootEvent, type Device, type Overlay } from "./api";
+import { api, type BootEvent, type BootInterface, type Device, type Overlay } from "./api";
 import type { Live } from "./live";
 import { ago, fullTime } from "./time";
 
@@ -18,8 +18,21 @@ function Ago({ ms, now }: { ms: number | null | undefined; now: number }) {
   return <time title={fullTime(ms)}>{ago(ms, now)}</time>;
 }
 
+/** The boot interface a machine belongs under: where it was seen last, else where it's admitted. */
+export function homeOf(d: Device): string | null {
+  const seen = Object.entries(d.seen ?? {}).sort((a, b) => b[1].at - a[1].at);
+  return seen[0]?.[0] ?? d.admitted?.[0] ?? null;
+}
+
+/** "VLAN 5 · Hardware CI", or the label alone for an untagged interface. */
+export function ifaceName(i: BootInterface | undefined, name: string): string {
+  if (!i) return name;
+  return i.vlan !== null ? `VLAN ${i.vlan} · ${i.label}` : i.label;
+}
+
 export function Devices({ live, now }: { live: Live; now: number }) {
   const [open, setOpen] = useState<string | null>(null);
+  const ifaces = live.status?.interfaces ?? [];
   if (live.devices.length === 0) {
     return (
       <section className="empty">
@@ -31,31 +44,66 @@ export function Devices({ live, now }: { live: Live; now: number }) {
       </section>
     );
   }
+  // One group per boot interface (so per VLAN), in the config's order, then anything else.
+  const groups: { key: string; title: string; detail: string | null; devices: Device[] }[] = ifaces.map((i) => ({
+    key: i.interface,
+    title: ifaceName(i, i.interface),
+    detail: [i.interface, i.address].filter(Boolean).join(", "),
+    devices: [],
+  }));
+  for (const d of live.devices) {
+    const home = homeOf(d);
+    let g = groups.find((g) => g.key === (home ?? ""));
+    if (!g) {
+      g = { key: home ?? "", title: home ?? "Not seen on a boot interface yet", detail: null, devices: [] };
+      groups.push(g);
+    }
+    g.devices.push(d);
+  }
   return (
     <section>
-      <table className="devices">
-        <thead>
-          <tr>
-            <th>Machine</th>
-            <th>State</th>
-            <th>Address</th>
-            <th>Firmware</th>
-            <th>Next boot</th>
-            <th>Last seen</th>
-          </tr>
-        </thead>
-        <tbody>
-          {live.devices.map((d) => (
-            <DeviceRow key={d.mac} d={d} live={live} now={now} open={open === d.mac} toggle={() => setOpen(open === d.mac ? null : d.mac)} />
-          ))}
-        </tbody>
-      </table>
+      {groups
+        .filter((g) => g.devices.length > 0)
+        .map((g) => (
+          <div key={g.key} className="device-group">
+            <h2 className="group-title">
+              {g.title} <span className="muted small">{g.detail && `${g.detail} · `}{g.devices.length} machines</span>
+            </h2>
+            <table className="devices">
+              <thead>
+                <tr>
+                  <th>Machine</th>
+                  <th>State</th>
+                  <th>Address</th>
+                  <th>Firmware</th>
+                  <th>Next boot</th>
+                  <th>Last seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {g.devices.map((d) => (
+                  <DeviceRow
+                    key={d.mac}
+                    d={d}
+                    home={g.key}
+                    live={live}
+                    now={now}
+                    open={open === d.mac}
+                    toggle={() => setOpen(open === d.mac ? null : d.mac)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
     </section>
   );
 }
 
-function DeviceRow({ d, live, now, open, toggle }: { d: Device; live: Live; now: number; open: boolean; toggle: () => void }) {
+function DeviceRow({ d, home, live, now, open, toggle }: { d: Device; home: string; live: Live; now: number; open: boolean; toggle: () => void }) {
   const model = [d.manufacturer, d.product].filter(Boolean).join(" ");
+  const admitted = (d.admitted ?? []).includes(home);
+  const ip = d.seen?.[home]?.ip ?? d.ip;
   return (
     <>
       <tr className={open ? "row open" : "row"} onClick={toggle}>
@@ -66,13 +114,18 @@ function DeviceRow({ d, live, now, open, toggle }: { d: Device; live: Live; now:
         </td>
         <td>
           <span className={`state ${d.state}`}>{stateLabel[d.state]}</span>
+          {home && !admitted && (
+            <span className="tag warn" title="Held at the menu with public images only, until someone admits it">
+              not admitted
+            </span>
+          )}
           {d.state === "at_menu" && d.menu && (
             <div className="muted small">
               checked in <Ago ms={d.menu.last_poll} now={now} />
             </div>
           )}
         </td>
-        <td>{d.ip ?? <span className="muted">unknown</span>}</td>
+        <td>{ip ?? <span className="muted">unknown</span>}</td>
         <td>{d.firmware ?? <span className="muted">unknown</span>}</td>
         <td>
           {d.next.title}
@@ -197,6 +250,33 @@ function DeviceDetail({ d, live, now }: { d: Device; live: Live; now: number }) 
           </p>
         )}
         {error && <p className="error">{error}</p>}
+
+        <h3>Admitted on</h3>
+        <p className="muted small">
+          Where it may boot what it's assigned. Anywhere else it's held at the menu with public images only, and a Pi gets nothing.
+          Assigning it an image admits it where it was seen last.
+        </p>
+        <ul className="admission">
+          {(live.status?.interfaces ?? []).map((i) => {
+            const on = (d.admitted ?? []).includes(i.interface);
+            const seen = d.seen?.[i.interface];
+            return (
+              <li key={i.interface}>
+                <label>
+                  <input type="checkbox" checked={on} onChange={(e) => run(api.admit(d.mac, i.interface, e.currentTarget.checked))} />{" "}
+                  {ifaceName(i, i.interface)} <span className="muted small">({i.interface})</span>
+                </label>
+                {seen && (
+                  <span className="muted small">
+                    {" "}
+                    seen <Ago ms={seen.at} now={now} />
+                    {seen.ip && ` at ${seen.ip}`}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
 
         {overlays.length > 0 && (
           <>

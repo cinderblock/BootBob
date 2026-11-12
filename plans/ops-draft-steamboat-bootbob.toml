@@ -1,0 +1,38 @@
+# DRAFT for ops: servers/steamboat/stacks/bootbob/bootbob.toml, to land in the same ops
+# commit as the pin.json bump to a BootBob build with boot interfaces. The new BootBob
+# refuses the old file (interface/tftp/nbd/public_url/top-level http), and the old BootBob
+# refuses this one, so the two must change together. Not applied; awaiting Cameron's yes.
+#
+# Same behaviour as today on eno1. A CI VLAN is a second [[boot]] section, added once the
+# host has the subinterface (see plans/multi-interface.md, "Ops").
+
+# BootBob on steamboat. Paths not set here keep the image's defaults.
+data_dir = "/var/lib/bootbob"
+ipxe_dir = "/usr/share/bootbob/ipxe"
+web_dir = "/usr/share/bootbob/web"
+
+# The web UI and the management API, on the LAN address only: steamboat also has public
+# addresses and VLAN uplinks. Bound to eno1, so nothing arriving on another interface
+# reaches it. Caddy (host network) reaches it locally for http://pxe.tsl.
+[control]
+http = ["10.255.0.5:8067"]
+# The LAN: the network check probes here, the time zone is learnt only here, and mDNS
+# advertises here.
+network = "eno1"
+
+# Machines netboot on the LAN: the receive-only DHCP listener, TFTP (:69), HTTP (:8067,
+# shared with the control plane above) and NBD (:10809), all on eno1's address and bound
+# to eno1. What booting machines are told to fetch from is an IP, not pxe.tsl, so a boot
+# needs neither DNS nor Caddy.
+[[boot]]
+interface = "eno1"
+label = "TSL LAN"
+address = "10.255.0.5"
+url = "http://10.255.0.5:8067"
+
+# Image stores: disk images named "uberfall:<disk>.img" live on uberfall's
+# bootbob-store (servers/uberfall/stacks/bootbob-store). Machines reach it
+# directly for NBD; this server reads their boot files from it.
+[[stores]]
+name = "uberfall"
+url = "http://10.255.0.3:8068"

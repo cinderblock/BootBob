@@ -1,11 +1,14 @@
-# BootBob's config in the Docker image. Mount your own over it; everything is optional.
+# BootBob's config in the Docker image. Mount your own over it; paths are optional.
 data_dir = "/var/lib/bootbob"
 ipxe_dir = "/usr/share/bootbob/ipxe"
 web_dir = "/usr/share/bootbob/web"
 
-# Listen only on the LAN address, not every interface:
-# http = "10.255.0.5:8067"
-# tftp = "10.255.0.5:69"
+# The web UI and the management API. Without an address, on every interface: name the
+# LAN address (and 127.0.0.1 for a reverse proxy on this host) to keep it off boot VLANs.
+# [control]
+# http = ["10.255.0.5:8067", "127.0.0.1:8067"]
+# network = "eno1"   # the LAN: network check, time zone, mDNS
 
-# The DHCP listener (receive-only) on the LAN interface:
+# Where machines netboot: nothing until you name an interface.
+# [[boot]]
 # interface = "eno1"

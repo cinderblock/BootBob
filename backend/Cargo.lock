@@ -132,6 +132,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -205,6 +206,7 @@ name = "bootbob-tftp"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "socket2",
  "tokio",
  "tracing",
 ]

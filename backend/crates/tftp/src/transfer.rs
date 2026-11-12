@@ -2,7 +2,6 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -87,7 +86,7 @@ impl Blocks {
 }
 
 pub(crate) async fn run<R: Resolver>(req: Request, options: Vec<(String, String)>, resolver: Arc<R>, config: Config) {
-    let sock = match UdpSocket::bind(SocketAddr::new(req.local.ip(), 0)).await {
+    let sock = match crate::bind_on(req.local.ip(), 0, config.device.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(peer = %req.peer, "TFTP: can't open a transfer socket: {e}");

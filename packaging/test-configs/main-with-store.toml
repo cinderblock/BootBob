@@ -3,18 +3,19 @@ data_dir = "/var/lib/bootbob"
 ipxe_dir = "/usr/share/bootbob/ipxe"
 web_dir = "/usr/share/bootbob/web"
 
-# The LAN address only: steamboat also has public addresses.
-http = "10.255.0.5:8067"
-tftp = "10.255.0.5:69"
-# Network root filesystems (NBD): disk images, each only to the machine assigned it.
-nbd = "10.255.0.5:10809"
+# The web UI and the management API: the LAN address, and loopback for Caddy on this host.
+# Machines never need them.
+[control]
+http = ["10.255.0.5:8067", "127.0.0.1:8067"]
+# The LAN: the network check probes it, its time zone is used, mDNS advertises there.
+network = "eno1"
 
-# What booting machines are told to fetch from. An IP, not pxe.tsl, so a boot
-# needs neither DNS nor Caddy.
-public_url = "http://10.255.0.5:8067"
-
-# The receive-only DHCP listener, and the interface the network check probes on.
+# Machines netboot on the LAN: the DHCP listener, TFTP, HTTP and NBD on its address
+# (10.255.0.5), bound to eno1 so nothing arriving on another interface reaches them.
+[[boot]]
 interface = "eno1"
+label = "TSL LAN"
+url = "http://10.255.0.5:8067"
 
 # Image stores: disk images named "uberfall:<disk>.img" live on uberfall's
 # bootbob-store (servers/uberfall/stacks/bootbob-store). Machines reach it
