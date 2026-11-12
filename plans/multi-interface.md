@@ -255,6 +255,12 @@ the segment.
     from each other (the new M1 Mac goes on it, and the Test Pi), but Cameron needs some
     way to send his own LAN jobs to the M1 for builds (less so the Test Pi). Proposed: a
     new thread for the network design in ops; BootBob's part is a second `[[boot]]`.
+    Cameron said ok, and added (2026-11-11): "Uberfall should not be reachable from VLAN",
+    and isolated VLANs must count as internet in steamboat's configs (notably Caddy),
+    because LAN privilege is decided by local source IPs. M1 access from his LAN: an extra
+    vNIC on his PC, or routing to him only. Thread started:
+    t3-thread://v2/ab3781d7-a1dd-4bbb-b3e9-6331e19b7569/mcp:1347b6d1-a8b0-4ab2-a521-ba2a282edebc
+    (ops, branch `ci-vlan`).
 
 ## Things not to do
 
