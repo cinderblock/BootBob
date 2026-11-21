@@ -118,7 +118,9 @@ the segment.
 ### 6. Out of scope / follow-ups
 
 - Image stores on a VLAN: a CI Pi using an `uberfall:` disk would connect to uberfall's
-  NBD directly, which isn't on VLAN 5. For now VLAN-served disks live on steamboat.
+  NBD directly, which isn't on the VLAN. Cameron (2026-11-11): "Steamboat should serve the
+  boot images as needed." A relay was proposed and declined (question 3): VLAN machines
+  use disks on steamboat.
 - Read-only exports (ISSUES.md, `bc912f6`).
 - Authentication on the control API: still none; it's reachable only where `[control]`
   listens.
@@ -161,11 +163,13 @@ the segment.
    `public` flag, a status chip per interface. Written.
 9. Build and test on Windows and Linux (WSL), web typecheck and tests, README, ISSUES.md,
    commit. Done.
-10. **← current** Ops, each change only with Cameron's yes:
-    a. `bootbob.toml` in the new shape (draft: `plans/ops-draft-steamboat-bootbob.toml`),
+10. Ops, each change only with Cameron's yes:
+    a. **Done 2026-11-11.** `bootbob.toml` in the new shape (draft: `plans/ops-draft-steamboat-bootbob.toml`),
        landing in the same ops commit as the `pin.json` bump to a build of this branch:
        the new BootBob refuses the old file and the old one refuses the new.
-    b. The CI VLAN: a UniFi network (VLAN id and subnet: the CI thread's or Cameron's
+    b. **Done (by the ops CI VLAN thread).** Steamboat's `bootbob.toml` has a second
+       `[[boot]]` on `iso-ci` (VLAN 80, 198.18.80.2, label "CI"); checked 2026-11-21:
+       both interfaces report their listener running with no error. The CI VLAN: a UniFi network (VLAN id and subnet: the CI thread's or Cameron's
        call), a tagged subinterface on steamboat (netplan isn't in ops today, only a
        networkd drop-in), and a second `[[boot]]` section. The ops UniFi tooling sets
        DHCP/netboot/hosts/policies but doesn't appear to create networks.
@@ -193,6 +197,12 @@ the segment.
   the host's own connection to `eth0`'s address (it arrives on `lo`, but the kernel matches
   it to `eth0`). So Caddy on steamboat proxying to `10.255.0.5:8067` keeps working; a socket
   bound to `lo` does *not* accept connections to `eth0`'s address.
+- **Renovate deploys BootBob by itself.** ops' Renovate (daily at 4:00 AM PST / 12:00Z,
+  `renovate.json` "App deploys") follows `ghcr.io/cinderblock/bootbob:latest` and
+  fast-forwards ops master with the new pin, which deploys. So every BootBob master push
+  publishes and then deploys within a day, and a change that breaks the prod config must
+  get its ops commit in before the next Renovate run. It also means a plan-only push to
+  master ships a new image; plan updates stay on this branch until there's code to merge.
 - `sentinel` can't build BootBob (not on its allowed list); local builds queue behind
   other threads' jobs in the 4-slot budget, often for 15+ minutes.
 
@@ -211,17 +221,29 @@ the segment.
       routes apart, forged DHCP time zone ignored off the control network
 - [x] ISSUES.md: "Anything on the LAN…" narrowed to "The control API has no authentication"
 - [x] Commit
-- [ ] Ops: `bootbob.toml` drafted, awaiting Cameron's yes (with the pin bump)
-- [ ] Ops: CI VLAN (UniFi, netplan, second `[[boot]]`), not started: needs VLAN id/subnet
-- [ ] e2e and rollout scripts (QEMU, CI only) pass on CI after a push (configs updated,
-      not run here)
-- [ ] Web UI looked at in a browser (only typechecked so far)
+- [x] Merged PR #1 (`3a54e5d`, 2026-11-11 4:33 PM PST); master CI passed and published
+      `sha256:37a7e855…`
+- [x] Ops: `bootbob.toml` + pin in ops `34a3e82b`, deployed by
+      https://github.com/cinderblock/ops/actions/runs/43131104591. Checked after: steamboat
+      reports eno1 "TSL LAN", listener running, all 3 known machines admitted on eno1, and
+      http://pxe.tsl answers 200 through Caddy. The new build refuses an old-style config
+      with the intended message (checked locally).
+- [x] Ops: CI VLAN live on `iso-ci` (VLAN 80) with its own `[[boot]]`, done in the ops thread
+- [x] e2e (PR CI) and rollout (pc-golden, dispatched on the branch) pass
+- [x] Thread closed by Cameron 2026-11-21 ("i think it's done"). Web UI was never looked at
+      in a browser, only typechecked and tested.
 
 ## Open questions for Cameron
 
 1. ~~Admission policy~~: answered, held at the menu, public images only.
 2. ~~API/UI on restricted interfaces~~: answered, separate config sets.
-3. Stores: OK that VLAN-served disks must live on steamboat for now? (Recommend yes.)
+3. Stores: Cameron: "Steamboat should serve the boot images as needed." Proposed: for a
+   boot interface that can't reach a store, steamboat relays NBD to the store (one copy,
+   overlays stay on the store), rather than copying the disk. Cameron (2026-11-11): "for
+   what purpose? probably no." **Decided: no relay.** Disks for VLAN machines live on
+   steamboat itself (an image uploaded there, or a store disk cached there by hand with a
+   `store:<store>/<disk>.img` catalogue entry). A store disk assigned to a VLAN machine
+   won't boot, since the VLAN can't reach the store.
 4. ~~Config shape~~: superseded by `[control]` + `[[boot]]`.
 5. ~~Shared address:port~~: yes.
 6. ~~Unadmitted Pi~~: nothing, waiting.
@@ -234,8 +256,18 @@ the segment.
    test (pc-golden.yml) runs only on master or by hand, so it was dispatched on the branch:
    https://github.com/cinderblock/BootBob/actions/runs/43124221939 passed, 2026-11-11
    4:20 PM PST (00:20Z). Next: Cameron's yes to merge (master publishes the image), then the
-   ops change with its own yes.
-10. The CI VLAN's id and subnet, and whether steamboat's netplan should come into ops.
+   ops change with its own yes. Both given and done.
+10. CI VLAN: Cameron (2026-11-11): id and subnet undecided; work with the ops repo to pick
+    and set up an isolated VLAN, maybe in a new thread. It must hold several hosts isolated
+    from each other (the new M1 Mac goes on it, and the Test Pi), but Cameron needs some
+    way to send his own LAN jobs to the M1 for builds (less so the Test Pi). Proposed: a
+    new thread for the network design in ops; BootBob's part is a second `[[boot]]`.
+    Cameron said ok, and added (2026-11-11): "Uberfall should not be reachable from VLAN",
+    and isolated VLANs must count as internet in steamboat's configs (notably Caddy),
+    because LAN privilege is decided by local source IPs. M1 access from his LAN: an extra
+    vNIC on his PC, or routing to him only. Thread started:
+    t3-thread://v2/ab3781d7-a1dd-4bbb-b3e9-6331e19b7569/mcp:1347b6d1-a8b0-4ab2-a521-ba2a282edebc
+    (ops, branch `ci-vlan`).
 
 ## Things not to do
 
