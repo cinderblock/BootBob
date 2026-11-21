@@ -167,7 +167,9 @@ the segment.
     a. **Done 2026-11-11.** `bootbob.toml` in the new shape (draft: `plans/ops-draft-steamboat-bootbob.toml`),
        landing in the same ops commit as the `pin.json` bump to a build of this branch:
        the new BootBob refuses the old file and the old one refuses the new.
-    b. **← current, waiting on Cameron.** The CI VLAN: a UniFi network (VLAN id and subnet: the CI thread's or Cameron's
+    b. **Done (by the ops CI VLAN thread).** Steamboat's `bootbob.toml` has a second
+       `[[boot]]` on `iso-ci` (VLAN 80, 198.18.80.2, label "CI"); checked 2026-11-21:
+       both interfaces report their listener running with no error. The CI VLAN: a UniFi network (VLAN id and subnet: the CI thread's or Cameron's
        call), a tagged subinterface on steamboat (netplan isn't in ops today, only a
        networkd drop-in), and a second `[[boot]]` section. The ops UniFi tooling sets
        DHCP/netboot/hosts/policies but doesn't appear to create networks.
@@ -226,9 +228,10 @@ the segment.
       reports eno1 "TSL LAN", listener running, all 3 known machines admitted on eno1, and
       http://pxe.tsl answers 200 through Caddy. The new build refuses an old-style config
       with the intended message (checked locally).
-- [ ] Ops: CI VLAN (UniFi, netplan, second `[[boot]]`), not started: needs VLAN id/subnet
+- [x] Ops: CI VLAN live on `iso-ci` (VLAN 80) with its own `[[boot]]`, done in the ops thread
 - [x] e2e (PR CI) and rollout (pc-golden, dispatched on the branch) pass
-- [ ] Web UI looked at in a browser (only typechecked so far)
+- [x] Thread closed by Cameron 2026-11-21 ("i think it's done"). Web UI was never looked at
+      in a browser, only typechecked and tested.
 
 ## Open questions for Cameron
 
