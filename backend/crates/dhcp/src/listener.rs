@@ -1,7 +1,8 @@
 //! The passive listener: a receive-only packet socket on one interface.
 //!
 //! It reports DHCP messages (from clients and from servers) and TFTP read requests, with
-//! the sender's MAC. It is only ever read from; nothing is transmitted on it.
+//! the sender's MAC. It is only ever read from; nothing is transmitted on it. Frames of a
+//! VLAN on top of the interface are left to that VLAN's own listener.
 
 use std::net::Ipv4Addr;
 
@@ -37,6 +38,15 @@ pub fn classify(raw: &[u8]) -> Option<Seen> {
     }
 }
 
+/// Whether a frame a packet socket received arrived on its own interface, given the 802.1Q
+/// tag (TCI) the kernel reported with it. A packet socket on a VLAN's parent also gets that
+/// VLAN's frames, and with receive VLAN offload the NIC has already taken the tag off, so
+/// they look untagged: only the reported tag says they belong to the subinterface.
+/// Priority-tagged frames (VLAN 0) are the parent's own.
+pub fn arrived_untagged(vlan_tci: Option<u16>) -> bool {
+    vlan_tci.is_none_or(|tci| tci & 0x0fff == 0)
+}
+
 /// Listens on `interface` until an error, calling `seen` for each match. Linux only; on
 /// other systems it returns `Unsupported` at once.
 pub async fn listen(interface: &str, seen: impl FnMut(Seen) + Send) -> std::io::Result<()> {
@@ -52,9 +62,12 @@ mod imp {
 
     use tokio::io::unix::AsyncFd;
 
-    use super::{Seen, classify};
+    use super::{Seen, arrived_untagged, classify};
 
-    const ETH_P_IP: u16 = 0x0800;
+    /// Every protocol: a tap, which sees each frame as it arrives, VLAN tag and all. A
+    /// socket for IPv4 alone gets a VLAN's frames on the parent too, but only after the
+    /// kernel has handed them to the VLAN and forgotten their tag.
+    const ETH_P_ALL: u16 = 0x0003;
     const PACKET_OUTGOING: u8 = 4;
 
     /// `tcpdump -dd 'ip and udp and (port 67 or port 68 or dst port 69)'`: drop everything
@@ -94,7 +107,7 @@ mod imp {
             let fd = check(libc::socket(
                 libc::AF_PACKET,
                 libc::SOCK_RAW | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-                ETH_P_IP.to_be() as libc::c_int,
+                ETH_P_ALL.to_be() as libc::c_int,
             ))?;
             let fd = OwnedFd::from_raw_fd(fd);
             let mut prog: Vec<libc::sock_filter> = FILTER.iter().map(|&(code, jt, jf, k)| libc::sock_filter { code, jt, jf, k }).collect();
@@ -106,9 +119,19 @@ mod imp {
                 &fprog as *const _ as *const libc::c_void,
                 size_of::<libc::sock_fprog>() as libc::socklen_t,
             ))?;
+            // Each frame's VLAN tag, so a VLAN's frames seen on its parent aren't taken
+            // for the parent's own (see `arrived_untagged`).
+            let on: libc::c_int = 1;
+            check(libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_PACKET,
+                libc::PACKET_AUXDATA,
+                &on as *const _ as *const libc::c_void,
+                size_of::<libc::c_int>() as libc::socklen_t,
+            ))?;
             let mut sll: libc::sockaddr_ll = zeroed();
             sll.sll_family = libc::AF_PACKET as u16;
-            sll.sll_protocol = ETH_P_IP.to_be();
+            sll.sll_protocol = ETH_P_ALL.to_be();
             sll.sll_ifindex = ifindex as i32;
             check(libc::bind(
                 fd.as_raw_fd(),
@@ -122,6 +145,44 @@ mod imp {
         }
     }
 
+    /// Receives one frame: its length, its packet type, and the VLAN tag (TCI) the kernel
+    /// reported for it, if any.
+    fn recv(fd: libc::c_int, buf: &mut [u8]) -> io::Result<(usize, u8, Option<u16>)> {
+        // Room for the one control message asked for (PACKET_AUXDATA), 8-byte aligned.
+        let mut control = [0u64; 8];
+        // SAFETY: recvmsg into a buffer, a sockaddr_ll and a control buffer we own, sizes
+        // passed. The kernel fills in at most `msg_controllen` bytes, and the CMSG_* macros
+        // only walk within them; the aux data is read unaligned from the message's data.
+        unsafe {
+            let mut sll: libc::sockaddr_ll = zeroed();
+            let mut iov = libc::iovec { iov_base: buf.as_mut_ptr() as *mut libc::c_void, iov_len: buf.len() };
+            let mut msg: libc::msghdr = zeroed();
+            msg.msg_name = &mut sll as *mut _ as *mut libc::c_void;
+            msg.msg_namelen = size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+            msg.msg_controllen = size_of_val(&control) as _;
+            let n = libc::recvmsg(fd, &mut msg, 0);
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut vlan = None;
+            let mut c = libc::CMSG_FIRSTHDR(&msg);
+            while !c.is_null() {
+                if (*c).cmsg_level == libc::SOL_PACKET && (*c).cmsg_type == libc::PACKET_AUXDATA {
+                    let aux = std::ptr::read_unaligned(libc::CMSG_DATA(c) as *const libc::tpacket_auxdata);
+                    // Old kernels report the tag without the flag.
+                    if aux.tp_status & libc::TP_STATUS_VLAN_VALID != 0 || aux.tp_vlan_tci != 0 {
+                        vlan = Some(aux.tp_vlan_tci);
+                    }
+                }
+                c = libc::CMSG_NXTHDR(&msg, c);
+            }
+            Ok((n as usize, sll.sll_pkttype, vlan))
+        }
+    }
+
     pub async fn listen(interface: &str, mut seen: impl FnMut(Seen) + Send) -> io::Result<()> {
         let fd = open(interface)?;
         // SAFETY: an OwnedFd always returns the descriptor it owns, which stays open until
@@ -131,26 +192,13 @@ mod imp {
         let mut buf = vec![0u8; 65536];
         loop {
             let mut guard = fd.readable().await?;
-            let res = guard.try_io(|inner| {
-                // SAFETY: recvfrom into a buffer and a sockaddr_ll we own, sizes passed.
-                unsafe {
-                    let mut sll: libc::sockaddr_ll = zeroed();
-                    let mut len = size_of::<libc::sockaddr_ll>() as libc::socklen_t;
-                    let n = libc::recvfrom(
-                        inner.as_raw_fd(),
-                        buf.as_mut_ptr() as *mut libc::c_void,
-                        buf.len(),
-                        0,
-                        &mut sll as *mut _ as *mut libc::sockaddr,
-                        &mut len,
-                    );
-                    if n < 0 { Err(io::Error::last_os_error()) } else { Ok((n as usize, sll.sll_pkttype)) }
-                }
-            });
+            let res = guard.try_io(|inner| recv(inner.as_raw_fd(), &mut buf));
             match res {
-                Ok(Ok((n, pkttype))) => {
-                    // Our own transmissions (TFTP replies, probes) are not observations.
+                Ok(Ok((n, pkttype, vlan))) => {
+                    // Our own transmissions (TFTP replies, probes) are not observations, and
+                    // a VLAN's frames belong to its own interface's listener.
                     if pkttype != PACKET_OUTGOING
+                        && arrived_untagged(vlan)
                         && let Some(s) = classify(&buf[..n])
                     {
                         seen(s);
@@ -204,6 +252,15 @@ mod tests {
 
         let f = frame::build(client, Mac([2; 6]), (Ipv4Addr::LOCALHOST, 5000), (Ipv4Addr::LOCALHOST, 53), b"dns");
         assert!(classify(&f).is_none());
+    }
+
+    #[test]
+    fn a_vlans_frames_are_not_the_parents() {
+        assert!(arrived_untagged(None));
+        // Priority-tagged: VLAN 0, PCP 5.
+        assert!(arrived_untagged(Some(5 << 13)));
+        assert!(!arrived_untagged(Some(80)));
+        assert!(!arrived_untagged(Some((3 << 13) | 80)));
     }
 
     fn bootbob_tftp_rrq(path: &str) -> Vec<u8> {
