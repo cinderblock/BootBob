@@ -356,3 +356,24 @@ fn allocated_space_follows_writes() {
     #[cfg(unix)]
     assert!((8192..32 * CHUNK).contains(&used), "{used}");
 }
+
+// Unix only: it needs sparse files, and a 32 GiB file on NTFS takes 32 GiB.
+#[cfg(unix)]
+#[test]
+fn small_reads_of_a_big_overlay_stay_fast() {
+    // A Pi's boot-file reader makes thousands of sector-sized reads per file. Each read
+    // must cost about its own size, not the size of the whole map (1 MiB at 32 GiB).
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("big.img");
+    File::create(&p).unwrap().set_len(32 << 30).unwrap();
+    let d = Cow::open(&p, &dir.path().join("overlays"), "pi", false).unwrap();
+    d.write_at(b"written", 4096 * 10).unwrap();
+    let start = std::time::Instant::now();
+    let mut buf = [0u8; 512];
+    for i in 0..200_000u64 {
+        d.read_at(&mut buf, (i * 512) % (1 << 20)).unwrap();
+    }
+    assert_eq!(&read(&d, 4096 * 10, 7), b"written");
+    let took = start.elapsed();
+    assert!(took < std::time::Duration::from_secs(5), "200,000 small reads took {took:?}");
+}
