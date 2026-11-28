@@ -77,6 +77,7 @@ check "the root filesystem was grown" 'df -BG --output=size / | tail -1 | tr -d 
 check "the resident client is running" 'ps -eo args | grep "^@" | grep -i nbd'
 check "pi logs in with the key, has bash and no password, and sudo needs none" 'test "$(getent passwd pi | cut -d: -f7)" = /bin/bash && sudo -n passwd -S pi | grep -E "^pi L" && sudo -n true'
 check "pi has the Pi OS groups" 'id -nG | tr " " "\n" | grep -cxE "gpio|i2c|spi|dialout|video|sudo" | grep -x 6'
+check "no first-boot user banner on SSH" 'test ! -e /etc/ssh/sshd_config.d/rename_user.conf && echo none'
 check "first boot made SSH host keys" 'test -s /etc/ssh/ssh_host_ed25519_key.pub && ls /etc/ssh/ssh_host_ed25519_key.pub'
 check "machine-id exists" 'grep -qE "^[0-9a-f]{32}$" /etc/machine-id && cat /etc/machine-id'
 check "no hostname built in, and it resolves" 'test ! -e /etc/hostname && getent hosts "$(hostname)" && ! sudo -n true 2>&1 | grep -q "unable to resolve"'
