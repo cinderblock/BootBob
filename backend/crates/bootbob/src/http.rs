@@ -1216,8 +1216,10 @@ async fn store_disk(
     req: axum::extract::Request,
 ) -> Result<Response, ApiError> {
     let path = whole_disk(&st, peer, &disk)?;
-    let res = tower::ServiceExt::oneshot(ServeFile::new(path), req).await;
-    res.map(IntoResponse::into_response).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    // ServeFile can't fail: its errors are an empty type, and problems reading the file are
+    // responses.
+    let Ok(res) = tower::ServiceExt::oneshot(ServeFile::new(path), req).await;
+    Ok(res.into_response())
 }
 
 /// The settings, plus what the network says, which isn't a setting. A `PUT` of this ignores it.
