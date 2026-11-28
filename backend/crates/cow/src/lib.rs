@@ -338,12 +338,6 @@ impl Cow {
         bits[(chunk / 8) as usize] & (1 << (chunk % 8)) != 0
     }
 
-    /// Reads one run of chunks that are all in the overlay or all in the base.
-    fn read_run(&self, bits: &[u8], buf: &mut [u8], off: u64) -> io::Result<()> {
-        let from = if Self::in_overlay(bits, off / CHUNK) { &self.overlay } else { &self.base };
-        pread(from, buf, off)
-    }
-
     /// Writes `buf`, which isn't empty, at `off`, and sets its chunks' bits.
     fn write_locked(&self, bits: &mut [u8], buf: &[u8], off: u64) -> io::Result<()> {
         let end = off + buf.len() as u64;
@@ -385,19 +379,30 @@ impl Disk for Cow {
 
     fn read_at(&self, buf: &mut [u8], off: u64) -> io::Result<()> {
         check(off + buf.len() as u64 <= self.size, "read past the end of the disk")?;
-        let bits = self.bits.lock().unwrap().clone();
-        let mut pos = 0usize;
-        while pos < buf.len() {
-            let at = off + pos as u64;
-            let here = Self::in_overlay(&bits, at / CHUNK);
-            // Extend the run while the next chunks come from the same file.
-            let mut end = (at / CHUNK + 1) * CHUNK;
-            let limit = off + buf.len() as u64;
-            while end < limit && Self::in_overlay(&bits, end / CHUNK) == here {
-                end += CHUNK;
+        // Split the read into runs that come from one file, under the lock, then read them
+        // without it. Only this read's bits are looked at: copying the whole map instead
+        // (a MiB for a 32 GiB disk) on every call made the boot-file reader's thousands of
+        // small reads take seconds per file, longer than a Pi waits for TFTP.
+        let limit = off + buf.len() as u64;
+        let mut runs: Vec<(u64, usize, bool)> = Vec::new();
+        {
+            let bits = self.bits.lock().unwrap();
+            let mut at = off;
+            while at < limit {
+                let here = Self::in_overlay(&bits, at / CHUNK);
+                // Extend the run while the next chunks come from the same file.
+                let mut end = (at / CHUNK + 1) * CHUNK;
+                while end < limit && Self::in_overlay(&bits, end / CHUNK) == here {
+                    end += CHUNK;
+                }
+                let end = end.min(limit);
+                runs.push((at, (end - at) as usize, here));
+                at = end;
             }
-            let n = (end.min(limit) - at) as usize;
-            self.read_run(&bits, &mut buf[pos..pos + n], at)?;
+        }
+        let mut pos = 0usize;
+        for (at, n, overlay) in runs {
+            pread(if overlay { &self.overlay } else { &self.base }, &mut buf[pos..pos + n], at)?;
             pos += n;
         }
         Ok(())
