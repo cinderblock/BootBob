@@ -315,7 +315,10 @@ A stock Raspberry Pi OS image downloads, verifies and serves its boot files over
 its initramfs has no NBD client, so it can't run its root from the network as it is. The same
 goes for cloud images, which also keep their kernels off the FAT partition.
 `tools/make-pi-golden.sh`, `tools/make-pios-golden.sh` (Pi OS Lite itself, made to run from
-the network) and `tools/make-pc-golden.sh` build images that can.
+the network) and `tools/make-pc-golden.sh` build images that can. Pi OS keeps Wi-Fi blocked
+until a country is set, as it does on an SD card: on a machine that uses Wi-Fi, run
+`sudo raspi-config nonint do_wifi_country US` (your country) once. It stays set in the
+machine's overlay.
 
 ## A USB boot stick, and finding BootBob on the network
 

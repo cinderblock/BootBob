@@ -120,6 +120,9 @@ if [ "${1:-}" = --inside ]; then
   chmod 0440 "$R/etc/sudoers.d/010_pi-nopasswd"
   ch visudo -cq
   ch systemctl disable userconfig.service >/dev/null 2>&1
+  # userconfig removes its "SSH may not work until a valid user has been set up" banner when
+  # it runs. It never runs here, so remove it now.
+  rm "$R/etc/ssh/sshd_config.d/rename_user.conf"
   cat > "$R/usr/sbin/bootbob-first-boot" <<'EOF'
 #!/bin/sh
 # Lets in whoever holds the key in the boot partition. Runs once on each machine.
